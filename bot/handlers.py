@@ -1,7 +1,7 @@
 import os
 import subprocess
 import platform
-import requests
+import httpx
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes
 from bot.config import ALLOWED_USERS, TARGET_MAC, TARGET_HOST, AGENT_PORT
@@ -22,14 +22,14 @@ def get_keyboard():
 
 async def check_permissions(update: Update) -> bool:
     if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("⛔ Access denied")
+        await update.effective_message.reply_text("⛔ Access denied")
         return False
     return True
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         "👋 **Control Center Online**\n\nI can help you manage your PC remotely.",
         parse_mode="Markdown",
         reply_markup=get_keyboard()
@@ -46,13 +46,13 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔍 **Status** - Check network connectivity\n"
         "🏓 **Ping** - Check bot latency"
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_keyboard())
+    await update.effective_message.reply_text(help_text, parse_mode="Markdown", reply_markup=get_keyboard())
 
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
     
-    await update.message.reply_text("🔍 Checking connectivity...")
+    await update.effective_message.reply_text("🔍 Checking connectivity...")
     
     # 1. ICMP Ping
     param = '-n' if platform.system().lower() == 'windows' else '-c'
@@ -69,15 +69,16 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     agent_msg = ""
     if is_online:
         try:
-            r = requests.get(f"{AGENT_URL}/ping", timeout=2)
-            if r.status_code == 200:
-                agent_msg = "\n🤖 **Agent:** Connected ✅"
-            else:
-                agent_msg = "\n🤖 **Agent:** Error ⚠️"
-        except:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                r = await client.get(f"{AGENT_URL}/ping")
+                if r.status_code == 200:
+                    agent_msg = "\n🤖 **Agent:** Connected ✅"
+                else:
+                    agent_msg = "\n🤖 **Agent:** Error ⚠️"
+        except Exception:
             agent_msg = "\n🤖 **Agent:** Unreachable ❌"
 
-    await update.message.reply_text(
+    await update.effective_message.reply_text(
         f"🖥️ **PC Status:** {status_msg}{agent_msg}", 
         parse_mode="Markdown",
         reply_markup=get_keyboard()
@@ -88,42 +89,43 @@ async def wake_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     wake(TARGET_MAC)
-    await update.message.reply_text("🚀 **Magic Packet Sent!**\nWaiting for PC to wake up...", parse_mode="Markdown", reply_markup=get_keyboard())
+    await update.effective_message.reply_text("🚀 **Magic Packet Sent!**\nWaiting for PC to wake up...", parse_mode="Markdown", reply_markup=get_keyboard())
 
 async def shutdown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
     
-    await update.message.reply_text("🛑 Sending shutdown command...", reply_markup=get_keyboard())
+    await update.effective_message.reply_text("🛑 Sending shutdown command...", reply_markup=get_keyboard())
     try:
-        r = requests.post(f"{AGENT_URL}/shutdown", timeout=3)
-        if r.status_code == 200:
-            await update.message.reply_text("✅ **Shutdown Initiated**\nSystem is powering off.", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(f"⚠️ **Error:** Agent returned {r.status_code}", parse_mode="Markdown")
-    except requests.exceptions.RequestException:
-        await update.message.reply_text("❌ **Failed:** Agent unreachable.\nIs the PC on and Agent running?", parse_mode="Markdown")
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.post(f"{AGENT_URL}/shutdown")
+            if r.status_code == 200:
+                await update.effective_message.reply_text("✅ **Shutdown Initiated**\nSystem is powering off.", parse_mode="Markdown")
+            else:
+                await update.effective_message.reply_text(f"⚠️ **Error:** Agent returned {r.status_code}", parse_mode="Markdown")
+    except Exception:
+        await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.\nIs the PC on and Agent running?", parse_mode="Markdown")
 
 async def clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
     
     try:
-        r = requests.get(f"{AGENT_URL}/clipboard", timeout=3)
-        if r.status_code == 200:
-            history = r.json().get("history", [])
-            if not history:
-                content = "📋 **Clipboard is empty**"
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{AGENT_URL}/clipboard")
+            if r.status_code == 200:
+                history = r.json().get("history", [])
+                if not history:
+                    content = "📋 **Clipboard is empty**"
+                else:
+                    content = "📋 **Clipboard History:**\n\n" + "\n\n".join([f"🔹 `{item}`" for item in history])
+                await update.effective_message.reply_text(content, parse_mode="Markdown", reply_markup=get_keyboard())
             else:
-                content = "📋 **Clipboard History:**\n\n" + "\n\n".join([f"🔹 `{item}`" for item in history])
-            await update.message.reply_text(content, parse_mode="Markdown", reply_markup=get_keyboard())
-        else:
-            await update.message.reply_text(f"⚠️ **Error:** Agent returned {r.status_code}", parse_mode="Markdown")
-    except requests.exceptions.RequestException:
-        if update.effective_message:
-            await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.", parse_mode="Markdown")
+                await update.effective_message.reply_text(f"⚠️ **Error:** Agent returned {r.status_code}", parse_mode="Markdown")
+    except Exception:
+        await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.", parse_mode="Markdown")
 
 async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    await update.message.reply_text("🏓 **Pong!** Bot is active.", parse_mode="Markdown", reply_markup=get_keyboard())
+    await update.effective_message.reply_text("🏓 **Pong!** Bot is active.", parse_mode="Markdown", reply_markup=get_keyboard())
