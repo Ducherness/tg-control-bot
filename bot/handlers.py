@@ -120,7 +120,8 @@ async def clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"⚠️ **Error:** Agent returned {r.status_code}", parse_mode="Markdown")
     except requests.exceptions.RequestException:
-        await update.message.reply_text("❌ **Failed:** Agent unreachable.", parse_mode="Markdown")
+        if update.effective_message:
+            await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.", parse_mode="Markdown")
 
 async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
