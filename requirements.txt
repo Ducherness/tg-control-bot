@@ -4,3 +4,5 @@ pyperclip
 python-dotenv
 flask
 requests
+httpx
+

@@ -9,7 +9,10 @@ from bot.handlers import (
     clipboard_handler
 )
 from bot.config import BOT_TOKEN
+from telegram.ext import MessageHandler, filters
+from bot.handlers import text_router
 import logging
+
 
 # Basic logging
 logging.basicConfig(
@@ -31,6 +34,7 @@ def main():
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("shutdown", shutdown_handler))
     app.add_handler(CommandHandler("clipboard", clipboard_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
 
     print("Bot is polling...")
     app.run_polling()

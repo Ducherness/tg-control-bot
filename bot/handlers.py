@@ -129,3 +129,26 @@ async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
     await update.effective_message.reply_text("🏓 **Pong!** Bot is active.", parse_mode="Markdown", reply_markup=get_keyboard())
+
+from telegram.ext import MessageHandler, filters
+
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.effective_message.text
+
+    if text == "🚀 Wake":
+        await wake_handler(update, context)
+    elif text == "🛑 Shutdown":
+        await shutdown_handler(update, context)
+    elif text == "📋 Clipboard":
+        await clipboard_handler(update, context)
+    elif text == "🔍 Status":
+        await status_handler(update, context)
+    elif text == "🏓 Ping":
+        await ping_handler(update, context)
+    elif text == "ℹ️ Help":
+        await help_handler(update, context)
+    else:
+        await update.effective_message.reply_text(
+            "❓ Unknown command",
+            reply_markup=get_keyboard()
+        )
