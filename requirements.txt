@@ -9,3 +9,5 @@ httpx
 openai-whisper
 torch
 ffmpeg-python
+vosk
+soundfile
