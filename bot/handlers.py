@@ -18,8 +18,9 @@ def is_allowed(user_id: int) -> bool:
 def get_keyboard():
     keyboard = [
         [KeyboardButton("🚀 Wake"), KeyboardButton("🛑 Shutdown")],
-        [KeyboardButton("📋 Clipboard"), KeyboardButton("🔍 Status")],
-        [KeyboardButton("ℹ️ Help"), KeyboardButton("🏓 Ping")]
+        [KeyboardButton("📸 Screen"), KeyboardButton("📋 Clipboard")],
+        [KeyboardButton("📊 Stats"), KeyboardButton("🔊 Volume")],
+        [KeyboardButton("🔍 Status"), KeyboardButton("ℹ️ Help")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -45,7 +46,10 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🤖 **Control Panel Commands:**\n\n"
         "🚀 **Wake** - Send generic Wake-on-LAN packet\n"
         "🛑 **Shutdown** - Remote system shutdown (Requires Agent)\n"
+        "📸 **Screen** - Capture remote screen (Requires Agent)\n"
         "📋 **Clipboard** - View last 5 copied items (Requires Agent)\n"
+        "📊 **Stats** - View system CPU/RAM usage (Requires Agent)\n"
+        "🔊 **Volume** - Control system volume (Requires Agent)\n"
         "🔍 **Status** - Check network connectivity\n"
         "🏓 **Ping** - Check bot latency"
     )
@@ -128,6 +132,79 @@ async def clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.", parse_mode="Markdown")
 
+async def screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+    
+    await update.effective_message.reply_chat_action("upload_photo")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            r = await client.get(f"{AGENT_URL}/screenshot")
+            if r.status_code == 200:
+                await update.effective_message.reply_photo(r.content, caption="📸 **Screenshot**", reply_markup=get_keyboard())
+            else:
+                await update.effective_message.reply_text(f"⚠️ **Error:** Agent returned {r.status_code}")
+    except Exception:
+        await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.")
+
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+    
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get(f"{AGENT_URL}/stats")
+            if r.status_code == 200:
+                data = r.json()
+                msg = (
+                    f"📊 **System Stats**\n\n"
+                    f"🧠 **CPU:** {data['cpu']}%\n"
+                    f"💾 **RAM:** {data['ram_percent']}% ({data['ram_used_gb']}GB / {data['ram_total_gb']}GB)\n"
+                    f"💿 **Disk:** {data['disk_percent']}% (Free: {data['disk_free_gb']}GB)"
+                )
+                await update.effective_message.reply_text(msg, parse_mode="Markdown", reply_markup=get_keyboard())
+            else:
+                await update.effective_message.reply_text(f"⚠️ **Error:** Agent returned {r.status_code}")
+    except Exception:
+        await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.")
+
+async def volume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    # Check for arguments: /volume + /volume - /volume mute
+    # Or text "Volume +", "Volume -", "Mute"
+    # For now, just show current volume and simple toggle? 
+    # Let's make it interactive or just simple commands if text router supports it.
+    
+    # Simple implementation: Show volume and instructions or handle if text has args
+    # But since we are button based, maybe we can't easily do args unless we add more buttons.
+    # Let's just do a fetch of volume for now.
+    
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.post(f"{AGENT_URL}/volume", json={"action": "get"})
+            if r.status_code == 200:
+                data = r.json()
+                vol_status = "🔇 Muted" if data['muted'] else f"🔊 {data['level']}%"
+                
+                # We can send a message with inline buttons? 
+                # For simplicity, stick to text.
+                await update.effective_message.reply_text(
+                    f"🔊 **Volume:** {vol_status}\n\n"
+                    "reply with `+` to increase, `-` to decrease, or `mute` to toggle.", 
+                    parse_mode="Markdown",
+                    reply_markup=get_keyboard()
+                )
+            else:
+                await update.effective_message.reply_text(f"⚠️ **Error:** Agent returned {r.status_code}")
+    except Exception:
+        await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.")
+
+# We need a way to handle volume commands if we preserve the "reply with +" idea.
+# But for now, let's just stick to the main handlers.  
+
+
 async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
@@ -142,12 +219,55 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await shutdown_handler(update, context)
     elif text == "📋 Clipboard":
         await clipboard_handler(update, context)
+    elif text == "📸 Screen":
+        await screenshot_handler(update, context)
+    elif text == "📊 Stats":
+        await stats_handler(update, context)
+    elif text == "🔊 Volume":
+        await volume_handler(update, context)
     elif text == "🔍 Status":
         await status_handler(update, context)
     elif text == "🏓 Ping":
         await ping_handler(update, context)
     elif text == "ℹ️ Help":
         await help_handler(update, context)
+    elif text in ["+", "-", "mute"]: # Simple volume controls
+        # Determine action
+        action = "get"
+        level_change = 0.0
+        
+        if text == "mute":
+            action = "mute"
+        elif text == "+":
+            action = "set"
+            level_change = 0.1
+        elif text == "-":
+            action = "set"
+            level_change = -0.1
+            
+        # We need current volume to add/subtract? 
+        # Actually agent 'set' expects absolute level.
+        # So we need to 'get' then 'set'.
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                # First get current
+                r = await client.post(f"{AGENT_URL}/volume", json={"action": "get"})
+                if r.status_code == 200:
+                    current_data = r.json()
+                    current_level = float(current_data['level']) / 100.0
+                    
+                    if action == "mute":
+                         r2 = await client.post(f"{AGENT_URL}/volume", json={"action": "mute"})
+                         new_status = r2.json()
+                         await update.effective_message.reply_text(f"🔊 **Volume:** {new_status['status']}")
+                    elif action == "set":
+                        new_level = current_level + level_change
+                        r2 = await client.post(f"{AGENT_URL}/volume", json={"action": "set", "level": new_level})
+                        new_data = r2.json()
+                        await update.effective_message.reply_text(f"🔊 **Volume:** {int(new_data['level'] * 100)}%")
+        except Exception:
+             await update.effective_message.reply_text("❌ **Failed:** Agent unreachable.")
+        return
     else:
         await update.effective_message.reply_text(
             "❓ Unknown command",

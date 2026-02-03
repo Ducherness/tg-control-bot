@@ -11,3 +11,7 @@ torch
 ffmpeg-python
 vosk
 soundfile
+Pillow
+psutil
+pycaw
+comtypes
