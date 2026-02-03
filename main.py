@@ -6,7 +6,11 @@ from bot.handlers import (
     help_handler, 
     status_handler,
     shutdown_handler,
-    clipboard_handler
+    clipboard_handler,
+    screenshot_handler,
+    stats_handler,
+    volume_handler,
+    sleep_handler
 )
 from bot.config import BOT_TOKEN
 from telegram.ext import MessageHandler, filters
@@ -30,10 +34,14 @@ def main():
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("wake", wake_handler))
     app.add_handler(CommandHandler("ping", ping_handler))
-    
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("shutdown", shutdown_handler))
     app.add_handler(CommandHandler("clipboard", clipboard_handler))
+    app.add_handler(CommandHandler("screen", screenshot_handler))
+    app.add_handler(CommandHandler("screenshot", screenshot_handler))
+    app.add_handler(CommandHandler("stats", stats_handler))
+    app.add_handler(CommandHandler("volume", volume_handler))
+    app.add_handler(CommandHandler("sleep", sleep_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
     app.add_handler(MessageHandler(filters.VOICE, voice_handler))
 

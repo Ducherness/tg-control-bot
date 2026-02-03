@@ -3,14 +3,11 @@ import wave
 import subprocess
 from vosk import Model, KaldiRecognizer
 
-MODELS = {
-    "ru": Model("models/vosk-model-small-ru-0.22"),
-    "en": Model("models/vosk-model-small-en-us-0.15"),
-}
+MODEL = Model("models/vosk-model-small-en-us-0.15")
 
-def recognize(model: Model, wav_path: str) -> str:
+def recognize(wav_path: str) -> str:
     wf = wave.open(wav_path, "rb")
-    rec = KaldiRecognizer(model, wf.getframerate())
+    rec = KaldiRecognizer(MODEL, wf.getframerate())
 
     text = ""
     while True:
@@ -35,10 +32,4 @@ async def speech_to_text(audio_path: str) -> str:
         wav_path
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    results = {
-        lang: recognize(model, wav_path)
-        for lang, model in MODELS.items()
-    }
-
-    best = max(results.values(), key=len)
-    return best
+    return recognize(wav_path)
