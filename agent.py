@@ -57,6 +57,16 @@ def shutdown():
         os.system('shutdown -h now')
     return jsonify({"status": "shutting_down"})
 
+@app.route('/sleep', methods=['POST'])
+def sleep_pc():
+    logger.warning("Sleep command received")
+    if os.name == 'nt':
+        # Windows: rundll32.exe powrprof.dll,SetSuspendState 0,1,0
+        os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
+    else:
+        os.system('systemctl suspend')
+    return jsonify({"status": "sleeping"})
+
 @app.route('/clipboard', methods=['GET'])
 def get_clipboard():
     return jsonify({"history": list(clipboard_history)})
@@ -86,7 +96,7 @@ def stats():
     try:
         cpu_percent = psutil.cpu_percent(interval=0.1)
         mem = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
+        disk = psutil.disk_usage('C:\\\\')
         
         data = {
             "cpu": cpu_percent,

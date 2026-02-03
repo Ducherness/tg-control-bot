@@ -19,6 +19,10 @@ Allowed actions:
 - sleep
 - status
 - ping
+- screenshot
+- stats
+- volume
+- clipboard
 - unknown
 
 Examples:
@@ -27,6 +31,18 @@ Response: {"action":"wake"}
 
 User: shut it down
 Response: {"action":"shutdown"}
+
+User: take a screenshot
+Response: {"action":"screenshot"}
+
+User: show me cpu usage
+Response: {"action":"stats"}
+
+User: what's on my clipboard
+Response: {"action":"clipboard"}
+
+User: mute the volume
+Response: {"action":"volume"}
 """
 
 async def parse_intent(text: str) -> dict:
