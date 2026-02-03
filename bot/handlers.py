@@ -168,7 +168,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         text = speech_to_text(audio_path)
-        intent = parse_intent(text)
+        intent = await parse_intent(text)
 
         action = intent.get("action", "unknown")
 
