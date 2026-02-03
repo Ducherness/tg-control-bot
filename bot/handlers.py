@@ -6,6 +6,9 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ContextTypes
 from bot.config import ALLOWED_USERS, TARGET_MAC, TARGET_HOST, AGENT_PORT
 from bot.wol import wake
+from bot.voice import speech_to_text
+from bot.ai import parse_intent
+from telegram.ext import MessageHandler, filters
 
 AGENT_URL = f"http://{TARGET_HOST}:{AGENT_PORT}"
 
@@ -130,8 +133,6 @@ async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.effective_message.reply_text("🏓 **Pong!** Bot is active.", parse_mode="Markdown", reply_markup=get_keyboard())
 
-from telegram.ext import MessageHandler, filters
-
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.effective_message.text
 
@@ -152,3 +153,54 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❓ Unknown command",
             reply_markup=get_keyboard()
         )
+
+async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    voice = update.message.voice
+    file = await context.bot.get_file(voice.file_id)
+
+    audio_path = f"/tmp/{voice.file_id}.ogg"
+    await file.download_to_drive(audio_path)
+
+    await update.effective_message.reply_text("🎧 Processing voice command...")
+
+    try:
+        text = speech_to_text(audio_path)
+        intent = parse_intent(text)
+
+        action = intent.get("action", "unknown")
+
+        if action == "wake":
+            await wake_handler(update, context)
+            msg = "🧠 **Action:** Wake PC"
+
+        elif action == "shutdown":
+            await shutdown_handler(update, context)
+            msg = "🧠 **Action:** Shutdown PC"
+
+        elif action == "sleep":
+            await sleep_handler(update, context)
+            msg = "🧠 **Action:** Sleep PC"
+
+        elif action == "status":
+            await status_handler(update, context)
+            return
+
+        elif action == "ping":
+            await ping_handler(update, context)
+            return
+
+        else:
+            msg = "❓ **Unknown command**"
+
+        await update.effective_message.reply_text(
+            f"{msg}\n\n🗣 **You said:** `{text}`",
+            parse_mode="Markdown",
+            reply_markup=get_keyboard()
+        )
+
+    finally:
+        if os.path.exists(audio_path):
+            os.remove(audio_path)

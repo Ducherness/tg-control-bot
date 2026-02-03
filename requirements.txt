@@ -1,8 +1,11 @@
 python-telegram-bot==20.*
+openai>=1.0.0
 wakeonlan
 pyperclip
 python-dotenv
 flask
 requests
 httpx
-
+openai-whisper
+torch
+ffmpeg-python

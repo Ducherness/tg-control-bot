@@ -10,11 +10,10 @@ from bot.handlers import (
 )
 from bot.config import BOT_TOKEN
 from telegram.ext import MessageHandler, filters
-from bot.handlers import text_router
+from bot.handlers import text_router, voice_handler
 import logging
 
 
-# Basic logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -31,10 +30,12 @@ def main():
     app.add_handler(CommandHandler("help", help_handler))
     app.add_handler(CommandHandler("wake", wake_handler))
     app.add_handler(CommandHandler("ping", ping_handler))
+    
     app.add_handler(CommandHandler("status", status_handler))
     app.add_handler(CommandHandler("shutdown", shutdown_handler))
     app.add_handler(CommandHandler("clipboard", clipboard_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
 
     print("Bot is polling...")
     app.run_polling()
