@@ -167,7 +167,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("🎧 Processing voice command...")
 
     try:
-        text = speech_to_text(audio_path)
+        text = await speech_to_text(audio_path)
         intent = await parse_intent(text)
 
         action = intent.get("action", "unknown")
