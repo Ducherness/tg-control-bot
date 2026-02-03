@@ -119,20 +119,20 @@ def volume():
         
         devices = AudioUtilities.GetSpeakers()
         interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        volume = interface.QueryInterface(IAudioEndpointVolume)
+        vol_ctrl = interface.QueryInterface(IAudioEndpointVolume)
         
-        current_vol = volume.GetMasterVolumeLevelScalar()
+        current_vol = vol_ctrl.GetMasterVolumeLevelScalar()
         
         if action == 'set':
             level = float(data.get('level', 0.5))
             # Clamp between 0.0 and 1.0
             level = max(0.0, min(1.0, level))
-            volume.SetMasterVolumeLevelScalar(level, None)
+            vol_ctrl.SetMasterVolumeLevelScalar(level, None)
             return jsonify({"status": "set", "level": level})
             
         elif action == 'mute':
-            mute_status = not volume.GetMute() # Toggle
-            volume.SetMute(mute_status, None)
+            mute_status = not vol_ctrl.GetMute() # Toggle
+            vol_ctrl.SetMute(mute_status, None)
             return jsonify({"status": "muted" if mute_status else "unmuted"})
             
         elif action == 'get':
@@ -140,7 +140,7 @@ def volume():
             
         return jsonify({
             "level": round(current_vol * 100),
-            "muted": volume.GetMute() == 1
+            "muted": vol_ctrl.GetMute() == 1
         })
         
     except Exception as e:
