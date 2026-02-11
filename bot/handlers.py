@@ -61,7 +61,6 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.effective_message.reply_text("🔍 Checking connectivity...")
     
-    # 1. ICMP Ping
     param = '-n' if platform.system().lower() == 'windows' else '-c'
     command = ['ping', param, '1', TARGET_HOST]
     try:
@@ -72,7 +71,6 @@ async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     status_msg = "🟢 <b>Online</b>" if is_online else "🔴 <b>Offline</b>"
     
-    # 2. Agent Check (if online)
     agent_msg = ""
     if is_online:
         try:
@@ -233,7 +231,6 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif text == "ℹ️ Help":
         await help_handler(update, context)
     elif text in ["+", "-", "mute"]:
-        # Volume controls
         action = "get"
         level_change = 0.0
         
