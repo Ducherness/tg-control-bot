@@ -55,9 +55,11 @@ def _run_system_command(command: list[str]) -> None:
 
 
 def _audio_endpoint():
-    devices = AudioUtilities.GetSpeakers()
-    interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-    return interface.QueryInterface(IAudioEndpointVolume)
+    device = AudioUtilities.GetSpeakers()
+    volume_control = getattr(device, "EndpointVolume", None)
+    if volume_control is None:
+        raise RuntimeError("Default audio endpoint is unavailable")
+    return volume_control
 
 
 @contextmanager
