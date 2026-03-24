@@ -6,11 +6,12 @@ import subprocess
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 import psutil
 import pyperclip
-from comtypes import CLSCTX_ALL
+from comtypes import CLSCTX_ALL, CoInitialize, CoUninitialize
 from flask import Flask, jsonify, request, send_file
 from PIL import ImageGrab
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
@@ -59,8 +60,16 @@ def _audio_endpoint():
     return interface.QueryInterface(IAudioEndpointVolume)
 
 
-def _get_volume_state() -> dict:
-    volume_control = _audio_endpoint()
+@contextmanager
+def _com_context():
+    CoInitialize()
+    try:
+        yield
+    finally:
+        CoUninitialize()
+
+
+def _get_volume_state(volume_control) -> dict:
     return {
         "level": round(volume_control.GetMasterVolumeLevelScalar() * 100),
         "muted": volume_control.GetMute() == 1,
@@ -210,31 +219,34 @@ def volume():
     action = payload.get("action", "get")
 
     try:
-        volume_control = _audio_endpoint()
+        with _com_context():
+            volume_control = _audio_endpoint()
 
-        if action == "set":
-            raw_level = payload.get("level", 0.5)
-            level = max(0.0, min(1.0, float(raw_level)))
-            volume_control.SetMasterVolumeLevelScalar(level, None)
-            return jsonify({"status": "set", **_get_volume_state()})
+            if action == "set":
+                raw_level = payload.get("level", 0.5)
+                level = max(0.0, min(1.0, float(raw_level)))
+                volume_control.SetMasterVolumeLevelScalar(level, None)
+                return jsonify({"status": "set", **_get_volume_state(volume_control)})
 
-        if action == "step":
-            raw_delta = payload.get("delta", 0.0)
-            delta = float(raw_delta)
-            current_level = volume_control.GetMasterVolumeLevelScalar()
-            target_level = max(0.0, min(1.0, current_level + delta))
-            volume_control.SetMasterVolumeLevelScalar(target_level, None)
-            return jsonify({"status": "set", **_get_volume_state()})
+            if action == "step":
+                raw_delta = payload.get("delta", 0.0)
+                delta = float(raw_delta)
+                current_level = volume_control.GetMasterVolumeLevelScalar()
+                target_level = max(0.0, min(1.0, current_level + delta))
+                volume_control.SetMasterVolumeLevelScalar(target_level, None)
+                return jsonify({"status": "set", **_get_volume_state(volume_control)})
 
-        if action == "mute":
-            mute_status = not volume_control.GetMute()
-            volume_control.SetMute(mute_status, None)
-            return jsonify({"status": "muted" if mute_status else "unmuted", **_get_volume_state()})
+            if action == "mute":
+                mute_status = not volume_control.GetMute()
+                volume_control.SetMute(mute_status, None)
+                return jsonify(
+                    {"status": "muted" if mute_status else "unmuted", **_get_volume_state(volume_control)}
+                )
 
-        if action != "get":
-            return jsonify({"error": f"Unsupported action: {action}"}), 400
+            if action != "get":
+                return jsonify({"error": f"Unsupported action: {action}"}), 400
 
-        return jsonify({"status": "ok", **_get_volume_state()})
+            return jsonify({"status": "ok", **_get_volume_state(volume_control)})
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid volume payload"}), 400
     except Exception as error:

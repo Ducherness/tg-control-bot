@@ -70,6 +70,24 @@ async def _safe_reply(update: Update, text: str, *, parse_mode: str | None = "HT
     await update.effective_message.reply_text(text, parse_mode=parse_mode, reply_markup=get_keyboard())
 
 
+def _agent_error_text(error: Exception, fallback_message: str = "Agent request failed.") -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        details = fallback_message
+        try:
+            payload = error.response.json()
+            details = payload.get("error") or payload.get("status") or details
+        except Exception:
+            response_text = (error.response.text or "").strip()
+            if response_text:
+                details = response_text
+        return f"❌ <b>Agent error:</b> {_escape(details)}"
+
+    if isinstance(error, httpx.RequestError):
+        return "❌ <b>Failed:</b> Agent unreachable."
+
+    return f"❌ <b>Failed:</b> {_escape(fallback_message)}"
+
+
 async def check_permissions(update: Update) -> bool:
     if not is_allowed(update.effective_user.id if update.effective_user else None):
         await update.effective_message.reply_text("⛔ Access denied", reply_markup=get_keyboard())
@@ -172,8 +190,8 @@ async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📋 <b>Clipboard items:</b> {_escape(data.get('clipboard_items', 0))}"
         )
         await _safe_reply(update, text)
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to read health status."))
 
 
 async def wake_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -195,8 +213,8 @@ async def shutdown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await _agent_request("POST", "/shutdown", timeout=4.0)
         await _safe_reply(update, "🛑 <b>Shutdown initiated.</b>")
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable or shutdown was rejected.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Shutdown was rejected."))
 
 
 async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,8 +224,8 @@ async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await _agent_request("POST", "/sleep", timeout=4.0)
         await _safe_reply(update, "😴 <b>Sleep initiated.</b>")
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable or sleep was rejected.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Sleep was rejected."))
 
 
 async def clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -226,8 +244,8 @@ async def clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             escaped_item = _escape(_truncate_text(str(item), 500))
             items.append(f"{index}. <code>{escaped_item}</code>")
         await _safe_reply(update, "📋 <b>Clipboard History</b>\n\n" + "\n\n".join(items))
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to read clipboard history."))
 
 
 async def clear_clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -237,8 +255,8 @@ async def clear_clipboard_handler(update: Update, context: ContextTypes.DEFAULT_
     try:
         await _agent_request("DELETE", "/clipboard")
         await _safe_reply(update, "🧹 <b>Clipboard history cleared.</b>")
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to clear clipboard history."))
 
 
 async def screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,8 +272,8 @@ async def screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             parse_mode="HTML",
             reply_markup=get_keyboard(),
         )
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to capture screenshot."))
 
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,8 +293,8 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📁 <b>Path:</b> <code>{_escape(data.get('disk_path', 'n/a'))}</code>"
         )
         await _safe_reply(update, text)
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to read system stats."))
 
 
 async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -292,8 +310,8 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         block = _escape(_truncate_text("\n".join(log_lines)))
         await _safe_reply(update, f"📜 <b>Last Agent Logs</b>\n\n<pre>{block}</pre>")
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to read agent logs."))
 
 
 async def _volume_step(update: Update, delta: float) -> None:
@@ -321,8 +339,8 @@ async def volume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Use the keyboard buttons <b>-10%</b>, <b>Mute</b> and <b>+10%</b>."
         )
         await _safe_reply(update, text)
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to read volume state."))
 
 
 async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -398,8 +416,8 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await _volume_mute(update)
             return
-    except httpx.HTTPError:
-        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to change volume."))
         return
 
     intent = await parse_intent(text)
