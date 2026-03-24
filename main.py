@@ -1,52 +1,91 @@
-from telegram.ext import ApplicationBuilder, CommandHandler
-from bot.handlers import (
-    wake_handler, 
-    ping_handler, 
-    start_handler, 
-    help_handler, 
-    status_handler,
-    shutdown_handler,
-    clipboard_handler,
-    screenshot_handler,
-    stats_handler,
-    volume_handler,
-    sleep_handler
-)
-from bot.config import BOT_TOKEN
-from telegram.ext import MessageHandler, filters
-from bot.handlers import text_router, voice_handler
 import logging
 
+from telegram import BotCommand
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
+
+from bot.config import BOT_TOKEN
+from bot.handlers import (
+    clear_clipboard_handler,
+    clipboard_handler,
+    health_handler,
+    help_handler,
+    logs_handler,
+    menu_handler,
+    ping_handler,
+    screenshot_handler,
+    shutdown_handler,
+    sleep_handler,
+    start_handler,
+    stats_handler,
+    status_handler,
+    text_router,
+    voice_handler,
+    volume_handler,
+    wake_handler,
+)
 
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
+
+
+async def post_init(application):
+    commands = [
+        BotCommand("start", "open the control panel"),
+        BotCommand("menu", "show the keyboard again"),
+        BotCommand("help", "show available commands"),
+        BotCommand("wake", "wake the PC"),
+        BotCommand("status", "check host status"),
+        BotCommand("health", "show agent info"),
+        BotCommand("screen", "take a screenshot"),
+        BotCommand("clipboard", "show clipboard history"),
+        BotCommand("clearclip", "clear clipboard history"),
+        BotCommand("stats", "show cpu/ram/disk usage"),
+        BotCommand("logs", "show recent agent logs"),
+        BotCommand("volume", "show current volume"),
+        BotCommand("sleep", "put the PC to sleep"),
+        BotCommand("shutdown", "shutdown the PC"),
+        BotCommand("ping", "check whether the bot is alive"),
+    ]
+    await application.bot.set_my_commands(commands)
+
 
 def main():
     if not BOT_TOKEN:
         print("Error: BOT_TOKEN is missing in .env")
         return
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
-    app.add_handler(CommandHandler("start", start_handler))
-    app.add_handler(CommandHandler("help", help_handler))
-    app.add_handler(CommandHandler("wake", wake_handler))
-    app.add_handler(CommandHandler("ping", ping_handler))
-    app.add_handler(CommandHandler("status", status_handler))
-    app.add_handler(CommandHandler("shutdown", shutdown_handler))
-    app.add_handler(CommandHandler("clipboard", clipboard_handler))
-    app.add_handler(CommandHandler("screen", screenshot_handler))
-    app.add_handler(CommandHandler("screenshot", screenshot_handler))
-    app.add_handler(CommandHandler("stats", stats_handler))
-    app.add_handler(CommandHandler("volume", volume_handler))
-    app.add_handler(CommandHandler("sleep", sleep_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
-    app.add_handler(MessageHandler(filters.VOICE, voice_handler))
+    command_handlers = {
+        "start": start_handler,
+        "menu": menu_handler,
+        "help": help_handler,
+        "wake": wake_handler,
+        "ping": ping_handler,
+        "status": status_handler,
+        "health": health_handler,
+        "shutdown": shutdown_handler,
+        "sleep": sleep_handler,
+        "clipboard": clipboard_handler,
+        "clearclip": clear_clipboard_handler,
+        "screen": screenshot_handler,
+        "screenshot": screenshot_handler,
+        "stats": stats_handler,
+        "logs": logs_handler,
+        "volume": volume_handler,
+    }
+
+    for command, handler in command_handlers.items():
+        application.add_handler(CommandHandler(command, handler))
+
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_router))
+    application.add_handler(MessageHandler(filters.VOICE, voice_handler))
 
     print("Bot is polling...")
-    app.run_polling()
+    application.run_polling()
+
 
 if __name__ == "__main__":
     main()

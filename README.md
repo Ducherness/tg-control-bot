@@ -1,39 +1,35 @@
-# 🎮 Telegram PC Control Bot
+# Telegram PC Control Bot
 
-Remote control your Windows PC from Telegram with Wake-on-LAN, screenshots, system stats, volume control, and more.
+Remote control a Windows PC from Telegram: wake it up, inspect its state, fetch screenshots, clear clipboard history and manage sound.
 
-## ✨ Features
+## Features
 
 | Command | Description |
 |---------|-------------|
-| 🚀 **Wake** | Send Wake-on-LAN magic packet |
-| 🛑 **Shutdown** | Remote system shutdown |
-| 😴 **Sleep** | Put PC to sleep |
-| 📸 **Screen** | Capture remote screenshot |
-| 📋 **Clipboard** | View last 5 copied items |
-| 📊 **Stats** | View CPU, RAM, Disk usage |
-| 🔊 **Volume** | Control system volume |
-| 🔍 **Status** | Check PC & Agent connectivity |
-| 🎤 **Voice** | Voice commands via AI |
+| `Wake` | Send a Wake-on-LAN magic packet |
+| `Status` | Check whether the host and the agent are reachable |
+| `Health` | Show agent uptime, PID and basic runtime info |
+| `Screen` | Capture a screenshot from the remote PC |
+| `Clipboard` | Show recent clipboard entries |
+| `Clear Clip` | Clear the clipboard history stored by the agent |
+| `Stats` | CPU, RAM and disk usage |
+| `Logs` | Last agent log lines |
+| `Volume` | Show current sound state, mute and adjust by 10% |
+| `Sleep` | Put the PC to sleep |
+| `Shutdown` | Shut the PC down |
+| `Voice` | Speech-to-text commands with local Vosk recognition |
 
-## 🏗️ Architecture
+## Architecture
 
-```
-┌─────────────────┐         ┌─────────────────┐
-│   Telegram Bot  │◄───────►│   Windows PC    │
-│  (Linux Server) │   HTTP  │   (Agent.py)    │
-└─────────────────┘         └─────────────────┘
-       │                           │
-       │                           ├── Screenshot
-       │                           ├── Clipboard
-       │                           ├── Volume
-       │                           ├── Stats
-       │                           └── Shutdown/Sleep
-       │
-       └── Wake-on-LAN (UDP)
+```text
+Telegram Bot <-> HTTP <-> Windows Agent
+       |                     |
+       +---- Wake-on-LAN ----+
 ```
 
-## 📦 Installation
+The bot can run on Linux or Windows. The agent is intended for Windows.
+
+## Installation
 
 ### 1. Clone the repository
 
@@ -48,15 +44,16 @@ cd tg-control-bot
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment
+### 3. Configure `.env`
 
-Copy `.env.example` to `.env` and fill in your values:
+Copy `.env.example` to `.env` and set your values:
 
 ```env
 BOT_TOKEN=your_telegram_bot_token
 TARGET_MAC=AA:BB:CC:DD:EE:FF
 TARGET_HOST=192.168.0.102
 AGENT_PORT=8000
+AGENT_TIMEOUT=5
 ALLOWED_USERS=123456789,987654321
 OPENROUTER_API_KEY=your_openrouter_key
 OPENROUTER_MODEL=openai/gpt-4o-mini
@@ -64,147 +61,106 @@ OPENROUTER_MODEL=openai/gpt-4o-mini
 
 | Variable | Description |
 |----------|-------------|
-| `BOT_TOKEN` | Telegram Bot token from [@BotFather](https://t.me/BotFather) |
-| `TARGET_MAC` | MAC address of PC for Wake-on-LAN |
-| `TARGET_HOST` | IP address of your Windows PC |
-| `AGENT_PORT` | Port for Agent (default: 8000) |
+| `BOT_TOKEN` | Telegram bot token from [@BotFather](https://t.me/BotFather) |
+| `TARGET_MAC` | MAC address used for Wake-on-LAN |
+| `TARGET_HOST` | IP or hostname of the Windows PC |
+| `AGENT_PORT` | Agent port, default `8000` |
+| `AGENT_TIMEOUT` | Default HTTP timeout for bot-to-agent requests |
 | `ALLOWED_USERS` | Comma-separated Telegram user IDs |
-| `OPENROUTER_API_KEY` | API key for voice command AI |
-| `OPENROUTER_MODEL` | AI model for intent parsing |
+| `OPENROUTER_API_KEY` | Optional. Used for better intent parsing |
+| `OPENROUTER_MODEL` | Optional. OpenRouter model for intent parsing |
 
-### 4. Download Vosk model (for voice commands)
+If `OPENROUTER_API_KEY` is missing, the bot falls back to a local keyword parser instead of failing.
 
-```bash
-mkdir -p models
-cd models
-wget https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
-unzip vosk-model-small-en-us-0.15.zip
+### 4. Download a Vosk model for voice commands
+
+Create `models/vosk-model-small-en-us-0.15` and unpack the model there.
+
+Install `ffmpeg` separately and make sure `ffmpeg` is available in `PATH`.
+
+If the model is missing, the bot still works, but voice commands will return a readable error instead of crashing on startup.
+
+## Running
+
+### Windows Agent
+
+Visible console:
+
+```bat
+start_agent.bat
 ```
 
-## 🚀 Running
+Hidden background launch:
 
-### On Windows PC (Agent)
-
-```bash
-python agent.py
-```
-
-Or run hidden in background:
-```bash
+```bat
 wscript start_agent_hidden.vbs
 ```
 
-### On Linux Server (Bot)
+The launcher now:
+
+- works without a hardcoded absolute path
+- prefers `venv\Scripts\python.exe`, then `py -3`, then `python`
+- writes startup diagnostics to `logs/agent-launch.log`
+- writes runtime logs to `logs/agent.log`
+
+### Telegram Bot
 
 ```bash
 python main.py
 ```
 
-## 📁 Project Structure
-
-```
-tg-control-bot/
-├── agent.py              # Windows agent (Flask API)
-├── main.py               # Telegram bot entry point
-├── bot/
-│   ├── handlers.py       # Command handlers
-│   ├── config.py         # Environment config
-│   ├── ai.py             # AI intent parser
-│   ├── voice.py          # Speech-to-text
-│   └── wol.py            # Wake-on-LAN
-├── models/               # Vosk speech models
-├── requirements.txt
-├── start_agent.bat
-├── start_agent_hidden.vbs
-└── .env
-```
-
-## 🔧 Agent Endpoints
+## Agent endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/ping` | GET | Health check |
-| `/shutdown` | POST | Shutdown PC |
-| `/sleep` | POST | Sleep PC |
-| `/screenshot` | GET | Capture screen (JPEG) |
-| `/clipboard` | GET | Get clipboard history |
-| `/stats` | GET | Get system stats |
-| `/volume` | POST | Control volume |
+| `/ping` | `GET` | Lightweight health check |
+| `/health` | `GET` | Runtime info and resource snapshot |
+| `/shutdown` | `POST` | Shutdown the PC |
+| `/sleep` | `POST` | Put the PC to sleep |
+| `/screenshot` | `GET` | Capture a screenshot |
+| `/clipboard` | `GET` | Return clipboard history |
+| `/clipboard` | `DELETE` | Clear clipboard history |
+| `/stats` | `GET` | CPU, RAM and disk usage |
+| `/volume` | `POST` | Get, set, mute or step volume |
+| `/logs` | `GET` | Read recent agent logs |
 
-### Volume Actions
+### Volume actions
 
 ```json
-{"action": "get"}           // Get current volume
-{"action": "set", "level": 0.5}  // Set volume (0.0 - 1.0)
-{"action": "mute"}          // Toggle mute
+{"action": "get"}
+{"action": "set", "level": 0.5}
+{"action": "step", "delta": 0.1}
+{"action": "mute"}
 ```
 
-## 🎤 Voice Commands
+## Notes
 
-Send a voice message to the bot. Supported commands:
-- "Turn on my computer" → Wake
-- "Shut it down" → Shutdown
-- "Take a screenshot" → Screenshot
-- "Show me CPU usage" → Stats
-- "What's on my clipboard" → Clipboard
-- "Mute the volume" → Volume
+- Clipboard and logs are escaped before being sent to Telegram, so copied HTML-like text no longer breaks formatting.
+- Voice processing uses temporary files in a platform-safe way.
+- The bot registers Telegram slash commands and also accepts simple free-form text like `status`, `show logs` or `clear clipboard`.
 
-## 🔒 Security
+## Project structure
 
-- Only users listed in `ALLOWED_USERS` can control the bot
-- Agent runs on local network only by default
-- No authentication on Agent (use firewall rules)
-
----
-
-## 📋 TODO / Roadmap
-
-### 🔐 Security
-- [ ] IP whitelist for Agent
-- [ ] Two-factor confirmation (PIN + Telegram ID)
-- [ ] `/panic` — instant shutdown
-- [ ] Auto-lock on new device login
-
-### 🗣️ Natural Language Control
-Complex multi-step commands:
-```
-"Close all browsers and put PC to sleep"
-```
-AI generates action plan:
-```json
-[
-  { "action": "close", "target": "browser" },
-  { "action": "sleep" }
-]
+```text
+tg-control-bot/
+├── agent.py
+├── main.py
+├── bot/
+│   ├── ai.py
+│   ├── config.py
+│   ├── handlers.py
+│   ├── voice.py
+│   └── wol.py
+├── start_agent.bat
+├── start_agent_hidden.vbs
+└── requirements.txt
 ```
 
-### 🧩 Context Memory
-```
-User: "включи компьютер"
-User: "подожди 10 минут"  
-User: "а теперь выключи"
-```
-Bot understands "а теперь" refers to the same PC.
+## Security
 
-### 🧍 Wake-word (Future)
-```
-"Assistant, turn on my PC"
-```
-Voice activation via microphone, without Telegram.
+- Only users listed in `ALLOWED_USERS` can operate the bot.
+- The agent still has no built-in authentication, so keep it behind a trusted network or firewall rules.
 
-### ⏱️ Timers & Scenarios
-- [ ] `"выключи через 30 минут"`
-- [ ] `"каждый день в 23:00 sleep"`
-- [ ] `"если CPU > 90% → уведомить"`
+## License
 
-### 🛠️ Dev / Ops
-- [ ] `/logs` — last 100 lines
-- [ ] `/restart_bot`
-- [ ] `/update` — git pull + restart
-- [ ] `/health`
-
----
-
-## 📄 License
-
-MIT License
+MIT

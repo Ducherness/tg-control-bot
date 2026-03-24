@@ -1,336 +1,454 @@
+import asyncio
+import html
+import logging
 import os
-import subprocess
 import platform
+import subprocess
+import tempfile
+
 import httpx
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
-from bot.config import ALLOWED_USERS, TARGET_MAC, TARGET_HOST, AGENT_PORT
-from bot.wol import wake
-from bot.voice import speech_to_text
+
 from bot.ai import parse_intent
-from telegram.ext import MessageHandler, filters
+from bot.config import AGENT_PORT, AGENT_TIMEOUT, ALLOWED_USERS, TARGET_HOST, TARGET_MAC
+from bot.voice import speech_to_text
+from bot.wol import wake
 
+logger = logging.getLogger(__name__)
 AGENT_URL = f"http://{TARGET_HOST}:{AGENT_PORT}"
+MAX_TEXT_BLOCK = 3500
 
-def is_allowed(user_id: int) -> bool:
-    return user_id in ALLOWED_USERS
 
-def get_keyboard():
+def is_allowed(user_id: int | None) -> bool:
+    return user_id is not None and user_id in ALLOWED_USERS
+
+
+def get_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton("🚀 Wake"), KeyboardButton("🛑 Shutdown")],
-        [KeyboardButton("📸 Screen"), KeyboardButton("📋 Clipboard")],
-        [KeyboardButton("📊 Stats"), KeyboardButton("🔊 Volume")],
-        [KeyboardButton("🔍 Status"), KeyboardButton("ℹ️ Help")]
+        [KeyboardButton("🚀 Wake"), KeyboardButton("🔍 Status"), KeyboardButton("🩺 Health")],
+        [KeyboardButton("📸 Screen"), KeyboardButton("📋 Clipboard"), KeyboardButton("🧹 Clear Clip")],
+        [KeyboardButton("📊 Stats"), KeyboardButton("📜 Logs"), KeyboardButton("🔊 Volume")],
+        [KeyboardButton("😴 Sleep"), KeyboardButton("🛑 Shutdown"), KeyboardButton("ℹ️ Help")],
+        [KeyboardButton("🔉 -10%"), KeyboardButton("🔇 Mute"), KeyboardButton("🔊 +10%")],
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+
+
+def _escape(value: object) -> str:
+    return html.escape(str(value), quote=False)
+
+
+def _format_uptime(seconds: int) -> str:
+    minutes, _ = divmod(max(seconds, 0), 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours:
+        parts.append(f"{hours}h")
+    parts.append(f"{minutes}m")
+    return " ".join(parts)
+
+
+def _truncate_text(text: str, limit: int = MAX_TEXT_BLOCK) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit - 3]}..."
+
+
+async def _agent_request(method: str, endpoint: str, timeout: float | None = None, **kwargs) -> httpx.Response:
+    request_timeout = timeout if timeout is not None else AGENT_TIMEOUT
+    async with httpx.AsyncClient(timeout=request_timeout) as client:
+        response = await client.request(method, f"{AGENT_URL}{endpoint}", **kwargs)
+        response.raise_for_status()
+        return response
+
+
+async def _safe_reply(update: Update, text: str, *, parse_mode: str | None = "HTML") -> None:
+    await update.effective_message.reply_text(text, parse_mode=parse_mode, reply_markup=get_keyboard())
+
 
 async def check_permissions(update: Update) -> bool:
-    if not is_allowed(update.effective_user.id):
-        await update.effective_message.reply_text("⛔ Access denied")
+    if not is_allowed(update.effective_user.id if update.effective_user else None):
+        await update.effective_message.reply_text("⛔ Access denied", reply_markup=get_keyboard())
         return False
     return True
+
+
+async def _ping_host() -> bool:
+    ping_param = "-n" if platform.system().lower() == "windows" else "-c"
+    command = ["ping", ping_param, "1", TARGET_HOST]
+
+    def _run_ping() -> bool:
+        try:
+            return subprocess.call(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ) == 0
+        except Exception:
+            return False
+
+    return await asyncio.to_thread(_run_ping)
+
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    await update.effective_message.reply_text(
-        "👋 <b>Control Center Online</b>\n\nI can help you manage your PC remotely.",
-        parse_mode="HTML",
-        reply_markup=get_keyboard()
+
+    text = (
+        "🖥️ <b>Remote Control Center</b>\n\n"
+        "Use the keyboard below or send a short text command.\n"
+        "Examples: <code>status</code>, <code>screen</code>, <code>mute</code>, <code>show logs</code>."
     )
+    await _safe_reply(update, text)
+
+
+async def menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await start_handler(update, context)
+
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
+
     help_text = (
-        "🤖 <b>Control Panel Commands:</b>\n\n"
-        "🚀 <b>Wake</b> - Send Wake-on-LAN packet\n"
-        "🛑 <b>Shutdown</b> - Remote system shutdown\n"
-        "😴 <b>Sleep</b> - Put PC to sleep\n"
-        "📸 <b>Screen</b> - Capture remote screen\n"
-        "📋 <b>Clipboard</b> - View last 5 copied items\n"
-        "📊 <b>Stats</b> - View system CPU/RAM usage\n"
-        "🔊 <b>Volume</b> - Control system volume\n"
-        "🔍 <b>Status</b> - Check network connectivity"
+        "🤖 <b>Available commands</b>\n\n"
+        "🚀 <b>Wake</b> - send Wake-on-LAN packet\n"
+        "🔍 <b>Status</b> - check host and agent reachability\n"
+        "🩺 <b>Health</b> - show agent uptime and runtime info\n"
+        "📸 <b>Screen</b> - capture current desktop\n"
+        "📋 <b>Clipboard</b> - show recent clipboard items\n"
+        "🧹 <b>Clear Clip</b> - clear clipboard history on the agent\n"
+        "📊 <b>Stats</b> - CPU, RAM and disk usage\n"
+        "📜 <b>Logs</b> - last agent log lines\n"
+        "🔊 <b>Volume</b> - current sound state\n"
+        "😴 <b>Sleep</b> - suspend the PC\n"
+        "🛑 <b>Shutdown</b> - power off the PC\n\n"
+        "You can also send free-form text like <code>take screenshot</code> or <code>clear clipboard</code>."
     )
-    await update.effective_message.reply_text(help_text, parse_mode="HTML", reply_markup=get_keyboard())
+    await _safe_reply(update, help_text)
+
 
 async def status_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    
-    await update.effective_message.reply_text("🔍 Checking connectivity...")
-    
-    param = '-n' if platform.system().lower() == 'windows' else '-c'
-    command = ['ping', param, '1', TARGET_HOST]
-    try:
-        response = subprocess.call(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        is_online = response == 0
-    except Exception:
-        is_online = False
 
-    status_msg = "🟢 <b>Online</b>" if is_online else "🔴 <b>Offline</b>"
-    
-    agent_msg = ""
-    if is_online:
+    await _safe_reply(update, "🔍 Checking connectivity...")
+    host_online = await _ping_host()
+
+    agent_text = "\n🤖 <b>Agent:</b> Unreachable ❌"
+    if host_online:
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
-                r = await client.get(f"{AGENT_URL}/ping")
-                if r.status_code == 200:
-                    agent_msg = "\n🤖 <b>Agent:</b> Connected ✅"
-                else:
-                    agent_msg = "\n🤖 <b>Agent:</b> Error ⚠️"
-        except Exception:
-            agent_msg = "\n🤖 <b>Agent:</b> Unreachable ❌"
+            response = await _agent_request("GET", "/ping", timeout=2.5)
+            payload = response.json()
+            agent_uptime = _format_uptime(int(payload.get("uptime_seconds", 0)))
+            hostname = _escape(payload.get("hostname", TARGET_HOST))
+            agent_text = f"\n🤖 <b>Agent:</b> Connected ✅\n🏷️ <b>Host:</b> {hostname}\n⏱️ <b>Uptime:</b> {agent_uptime}"
+        except httpx.HTTPError:
+            agent_text = "\n🤖 <b>Agent:</b> Unreachable ❌"
 
-    await update.effective_message.reply_text(
-        f"🖥️ <b>PC Status:</b> {status_msg}{agent_msg}", 
-        parse_mode="HTML",
-        reply_markup=get_keyboard()
-    )
+    status_text = "🟢 <b>Online</b>" if host_online else "🔴 <b>Offline</b>"
+    await _safe_reply(update, f"🖥️ <b>PC Status:</b> {status_text}{agent_text}")
+
+
+async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    try:
+        response = await _agent_request("GET", "/health")
+        data = response.json()
+        text = (
+            "🩺 <b>Agent Health</b>\n\n"
+            f"🏷️ <b>Host:</b> {_escape(data.get('hostname', TARGET_HOST))}\n"
+            f"🖥️ <b>Platform:</b> {_escape(data.get('system', 'Unknown'))}\n"
+            f"⏱️ <b>Agent uptime:</b> {_format_uptime(int(data.get('uptime_seconds', 0)))}\n"
+            f"📦 <b>PID:</b> {_escape(data.get('pid', 'n/a'))}\n"
+            f"🧠 <b>CPU:</b> {_escape(data.get('cpu_percent', 'n/a'))}%\n"
+            f"💾 <b>RAM:</b> {_escape(data.get('ram_percent', 'n/a'))}%\n"
+            f"📋 <b>Clipboard items:</b> {_escape(data.get('clipboard_items', 0))}"
+        )
+        await _safe_reply(update, text)
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+
 
 async def wake_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
 
+    if not TARGET_MAC:
+        await _safe_reply(update, "⚠️ <b>Error:</b> TARGET_MAC is not configured.")
+        return
+
     wake(TARGET_MAC)
-    await update.effective_message.reply_text("🚀 <b>Magic Packet Sent!</b>\nWaiting for PC to wake up...", parse_mode="HTML", reply_markup=get_keyboard())
+    await _safe_reply(update, "🚀 <b>Magic Packet Sent</b>\nWaiting for PC to wake up...")
+
 
 async def shutdown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    
-    await update.effective_message.reply_text("🛑 Sending shutdown command...", reply_markup=get_keyboard())
+
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            r = await client.post(f"{AGENT_URL}/shutdown")
-            if r.status_code == 200:
-                await update.effective_message.reply_text("✅ <b>Shutdown Initiated</b>\nSystem is powering off.", parse_mode="HTML")
-            else:
-                await update.effective_message.reply_text(f"⚠️ <b>Error:</b> Agent returned {r.status_code}", parse_mode="HTML")
-    except Exception:
-        await update.effective_message.reply_text("❌ <b>Failed:</b> Agent unreachable.\nIs the PC on and Agent running?", parse_mode="HTML")
+        await _agent_request("POST", "/shutdown", timeout=4.0)
+        await _safe_reply(update, "🛑 <b>Shutdown initiated.</b>")
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable or shutdown was rejected.")
+
 
 async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    
-    await update.effective_message.reply_text("😴 Sending sleep command...", reply_markup=get_keyboard())
+
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            r = await client.post(f"{AGENT_URL}/sleep")
-            if r.status_code == 200:
-                await update.effective_message.reply_text("✅ <b>Sleep Initiated</b>\nSystem is going to sleep.", parse_mode="HTML")
-            else:
-                await update.effective_message.reply_text(f"⚠️ <b>Error:</b> Agent returned {r.status_code}", parse_mode="HTML")
-    except Exception:
-        await update.effective_message.reply_text("❌ <b>Failed:</b> Agent unreachable.", parse_mode="HTML")
+        await _agent_request("POST", "/sleep", timeout=4.0)
+        await _safe_reply(update, "😴 <b>Sleep initiated.</b>")
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable or sleep was rejected.")
+
 
 async def clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    
+
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            r = await client.get(f"{AGENT_URL}/clipboard")
-            if r.status_code == 200:
-                history = r.json().get("history", [])
-                if not history:
-                    content = "📋 <b>Clipboard is empty</b>"
-                else:
-                    items = "\n\n".join([f"🔹 <code>{item}</code>" for item in history])
-                    content = f"📋 <b>Clipboard History:</b>\n\n{items}"
-                await update.effective_message.reply_text(content, parse_mode="HTML", reply_markup=get_keyboard())
-            else:
-                await update.effective_message.reply_text(f"⚠️ <b>Error:</b> Agent returned {r.status_code}", parse_mode="HTML")
-    except Exception:
-        await update.effective_message.reply_text("❌ <b>Failed:</b> Agent unreachable.", parse_mode="HTML")
+        response = await _agent_request("GET", "/clipboard")
+        history = response.json().get("history", [])
+        if not history:
+            await _safe_reply(update, "📋 <b>Clipboard is empty.</b>")
+            return
+
+        items = []
+        for index, item in enumerate(history, start=1):
+            escaped_item = _escape(_truncate_text(str(item), 500))
+            items.append(f"{index}. <code>{escaped_item}</code>")
+        await _safe_reply(update, "📋 <b>Clipboard History</b>\n\n" + "\n\n".join(items))
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+
+
+async def clear_clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    try:
+        await _agent_request("DELETE", "/clipboard")
+        await _safe_reply(update, "🧹 <b>Clipboard history cleared.</b>")
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+
 
 async def screenshot_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    
+
     await update.effective_message.reply_chat_action("upload_photo")
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(f"{AGENT_URL}/screenshot")
-            if r.status_code == 200:
-                await update.effective_message.reply_photo(r.content, caption="📸 <b>Screenshot</b>", parse_mode="HTML", reply_markup=get_keyboard())
-            else:
-                await update.effective_message.reply_text(f"⚠️ <b>Error:</b> Agent returned {r.status_code}", parse_mode="HTML")
-    except Exception:
-        await update.effective_message.reply_text("❌ <b>Failed:</b> Agent unreachable.", parse_mode="HTML")
+        response = await _agent_request("GET", "/screenshot", timeout=15.0)
+        await update.effective_message.reply_photo(
+            response.content,
+            caption="📸 <b>Screenshot</b>",
+            parse_mode="HTML",
+            reply_markup=get_keyboard(),
+        )
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+
 
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    
+
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            r = await client.get(f"{AGENT_URL}/stats")
-            if r.status_code == 200:
-                data = r.json()
-                msg = (
-                    f"📊 <b>System Stats</b>\n\n"
-                    f"🧠 <b>CPU:</b> {data['cpu']}%\n"
-                    f"💾 <b>RAM:</b> {data['ram_percent']}% ({data['ram_used_gb']}GB / {data['ram_total_gb']}GB)\n"
-                    f"💿 <b>Disk:</b> {data['disk_percent']}% (Free: {data['disk_free_gb']}GB)"
-                )
-                await update.effective_message.reply_text(msg, parse_mode="HTML", reply_markup=get_keyboard())
-            else:
-                await update.effective_message.reply_text(f"⚠️ <b>Error:</b> Agent returned {r.status_code}", parse_mode="HTML")
-    except Exception:
-        await update.effective_message.reply_text("❌ <b>Failed:</b> Agent unreachable.", parse_mode="HTML")
+        response = await _agent_request("GET", "/stats")
+        data = response.json()
+        text = (
+            "📊 <b>System Stats</b>\n\n"
+            f"🧠 <b>CPU:</b> {_escape(data.get('cpu', 'n/a'))}%\n"
+            f"💾 <b>RAM:</b> {_escape(data.get('ram_percent', 'n/a'))}% "
+            f"({_escape(data.get('ram_used_gb', 'n/a'))} GB / {_escape(data.get('ram_total_gb', 'n/a'))} GB)\n"
+            f"💿 <b>Disk:</b> {_escape(data.get('disk_percent', 'n/a'))}% "
+            f"({_escape(data.get('disk_free_gb', 'n/a'))} GB free of {_escape(data.get('disk_total_gb', 'n/a'))} GB)\n"
+            f"📁 <b>Path:</b> <code>{_escape(data.get('disk_path', 'n/a'))}</code>"
+        )
+        await _safe_reply(update, text)
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+
+
+async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    try:
+        response = await _agent_request("GET", "/logs", params={"lines": 20})
+        log_lines = response.json().get("lines", [])
+        if not log_lines:
+            await _safe_reply(update, "📜 <b>No logs yet.</b>")
+            return
+
+        block = _escape(_truncate_text("\n".join(log_lines)))
+        await _safe_reply(update, f"📜 <b>Last Agent Logs</b>\n\n<pre>{block}</pre>")
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+
+
+async def _volume_step(update: Update, delta: float) -> None:
+    response = await _agent_request("POST", "/volume", json={"action": "step", "delta": delta})
+    data = response.json()
+    await _safe_reply(update, f"🔊 <b>Volume:</b> {_escape(data.get('level', 'n/a'))}%")
+
+
+async def _volume_mute(update: Update) -> None:
+    response = await _agent_request("POST", "/volume", json={"action": "mute"})
+    data = response.json()
+    await _safe_reply(update, f"🔊 <b>Volume:</b> {_escape(data.get('status', 'unknown'))}")
+
 
 async def volume_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    
+
     try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            r = await client.post(f"{AGENT_URL}/volume", json={"action": "get"})
-            if r.status_code == 200:
-                data = r.json()
-                vol_status = "🔇 Muted" if data['muted'] else f"🔊 {data['level']}%"
-                
-                await update.effective_message.reply_text(
-                    f"🔊 <b>Volume:</b> {vol_status}\n\n"
-                    "Reply with <code>+</code> to increase, <code>-</code> to decrease, or <code>mute</code> to toggle.", 
-                    parse_mode="HTML",
-                    reply_markup=get_keyboard()
-                )
-            else:
-                await update.effective_message.reply_text(f"⚠️ <b>Error:</b> Agent returned {r.status_code}", parse_mode="HTML")
-    except Exception:
-        await update.effective_message.reply_text("❌ <b>Failed:</b> Agent unreachable.", parse_mode="HTML")
+        response = await _agent_request("POST", "/volume", json={"action": "get"})
+        data = response.json()
+        status = "🔇 Muted" if data.get("muted") else f"🔊 {data.get('level', 0)}%"
+        text = (
+            f"🔊 <b>Volume:</b> {status}\n\n"
+            "Use the keyboard buttons <b>-10%</b>, <b>Mute</b> and <b>+10%</b>."
+        )
+        await _safe_reply(update, text)
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+
 
 async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
-    await update.effective_message.reply_text("🏓 <b>Pong!</b> Bot is active.", parse_mode="HTML", reply_markup=get_keyboard())
+
+    await _safe_reply(update, "🏓 <b>Pong!</b> Bot is active.")
+
+
+async def _dispatch_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> bool:
+    handlers = {
+        "wake": wake_handler,
+        "shutdown": shutdown_handler,
+        "sleep": sleep_handler,
+        "status": status_handler,
+        "health": health_handler,
+        "logs": logs_handler,
+        "ping": ping_handler,
+        "screenshot": screenshot_handler,
+        "stats": stats_handler,
+        "volume": volume_handler,
+        "clipboard": clipboard_handler,
+        "clear_clipboard": clear_clipboard_handler,
+    }
+    handler = handlers.get(action)
+    if handler is None:
+        return False
+    await handler(update, context)
+    return True
+
 
 async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.effective_message.text
-
-    if text == "🚀 Wake":
-        await wake_handler(update, context)
-    elif text == "🛑 Shutdown":
-        await shutdown_handler(update, context)
-    elif text == "📋 Clipboard":
-        await clipboard_handler(update, context)
-    elif text == "📸 Screen":
-        await screenshot_handler(update, context)
-    elif text == "📊 Stats":
-        await stats_handler(update, context)
-    elif text == "🔊 Volume":
-        await volume_handler(update, context)
-    elif text == "🔍 Status":
-        await status_handler(update, context)
-    elif text == "🏓 Ping":
-        await ping_handler(update, context)
-    elif text == "ℹ️ Help":
-        await help_handler(update, context)
-    elif text in ["+", "-", "mute"]:
-        action = "get"
-        level_change = 0.0
-        
-        if text == "mute":
-            action = "mute"
-        elif text == "+":
-            action = "set"
-            level_change = 0.1
-        elif text == "-":
-            action = "set"
-            level_change = -0.1
-            
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                r = await client.post(f"{AGENT_URL}/volume", json={"action": "get"})
-                if r.status_code == 200:
-                    current_data = r.json()
-                    current_level = float(current_data['level']) / 100.0
-                    
-                    if action == "mute":
-                        r2 = await client.post(f"{AGENT_URL}/volume", json={"action": "mute"})
-                        new_status = r2.json()
-                        await update.effective_message.reply_text(f"🔊 <b>Volume:</b> {new_status['status']}", parse_mode="HTML")
-                    elif action == "set":
-                        new_level = current_level + level_change
-                        r2 = await client.post(f"{AGENT_URL}/volume", json={"action": "set", "level": new_level})
-                        new_data = r2.json()
-                        await update.effective_message.reply_text(f"🔊 <b>Volume:</b> {int(new_data['level'] * 100)}%", parse_mode="HTML")
-        except Exception:
-            await update.effective_message.reply_text("❌ <b>Failed:</b> Agent unreachable.", parse_mode="HTML")
+    if not await check_permissions(update):
         return
-    else:
-        await update.effective_message.reply_text(
-            "❓ Unknown command",
-            reply_markup=get_keyboard()
-        )
+
+    text = (update.effective_message.text or "").strip()
+
+    button_actions = {
+        "🚀 Wake": wake_handler,
+        "🛑 Shutdown": shutdown_handler,
+        "😴 Sleep": sleep_handler,
+        "📋 Clipboard": clipboard_handler,
+        "🧹 Clear Clip": clear_clipboard_handler,
+        "📸 Screen": screenshot_handler,
+        "📊 Stats": stats_handler,
+        "📜 Logs": logs_handler,
+        "🔊 Volume": volume_handler,
+        "🔍 Status": status_handler,
+        "🩺 Health": health_handler,
+        "ℹ️ Help": help_handler,
+    }
+
+    handler = button_actions.get(text)
+    if handler is not None:
+        await handler(update, context)
+        return
+
+    try:
+        if text == "🔉 -10%":
+            await _volume_step(update, -0.1)
+            return
+        if text == "🔇 Mute":
+            await _volume_mute(update)
+            return
+        if text == "🔊 +10%":
+            await _volume_step(update, 0.1)
+            return
+        if text in {"+", "-", "mute"}:
+            if text == "+":
+                await _volume_step(update, 0.1)
+            elif text == "-":
+                await _volume_step(update, -0.1)
+            else:
+                await _volume_mute(update)
+            return
+    except httpx.HTTPError:
+        await _safe_reply(update, "❌ <b>Failed:</b> Agent unreachable.")
+        return
+
+    intent = await parse_intent(text)
+    if await _dispatch_intent(update, context, intent.get("action", "unknown")):
+        return
+
+    await _safe_reply(update, "❓ <b>Unknown command.</b>\nTry <code>status</code>, <code>screen</code> or <code>help</code>.")
+
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
 
     voice = update.message.voice
-    file = await context.bot.get_file(voice.file_id)
+    temp_audio_path = None
 
-    audio_path = f"/tmp/{voice.file_id}.ogg"
-    await file.download_to_drive(audio_path)
-
-    await update.effective_message.reply_text("🎧 Processing voice command...")
+    await _safe_reply(update, "🎧 Processing voice command...", parse_mode=None)
 
     try:
-        text = await speech_to_text(audio_path)
+        telegram_file = await context.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as temp_file:
+            temp_audio_path = temp_file.name
+
+        await telegram_file.download_to_drive(temp_audio_path)
+        text = await speech_to_text(temp_audio_path)
+        if not text:
+            await _safe_reply(update, "⚠️ <b>Voice command was empty or not recognized.</b>")
+            return
+
         intent = await parse_intent(text)
-
-        action = intent.get("action", "unknown")
-
-        if action == "wake":
-            await wake_handler(update, context)
-            msg = "🧠 <b>Action:</b> Wake PC"
-
-        elif action == "shutdown":
-            await shutdown_handler(update, context)
-            msg = "🧠 <b>Action:</b> Shutdown PC"
-
-        elif action == "sleep":
-            await sleep_handler(update, context)
-            msg = "🧠 <b>Action:</b> Sleep PC"
-
-        elif action == "screenshot":
-            await screenshot_handler(update, context)
-            msg = "🧠 <b>Action:</b> Screenshot"
-
-        elif action == "stats":
-            await stats_handler(update, context)
-            msg = "🧠 <b>Action:</b> System Stats"
-
-        elif action == "clipboard":
-            await clipboard_handler(update, context)
-            msg = "🧠 <b>Action:</b> Clipboard"
-
-        elif action == "volume":
-            await volume_handler(update, context)
-            msg = "🧠 <b>Action:</b> Volume"
-
-        elif action == "status":
-            await status_handler(update, context)
+        handled = await _dispatch_intent(update, context, intent.get("action", "unknown"))
+        if not handled:
+            await _safe_reply(
+                update,
+                f"❓ <b>Unknown voice command.</b>\n\n🗣 <b>You said:</b> <code>{_escape(text)}</code>",
+            )
             return
 
-        elif action == "ping":
-            await ping_handler(update, context)
-            return
-
-        else:
-            msg = "❓ <b>Unknown command</b>"
-
-        await update.effective_message.reply_text(
-            f"{msg}\n\n🗣 <b>You said:</b> <code>{text}</code>",
-            parse_mode="HTML",
-            reply_markup=get_keyboard()
+        await _safe_reply(
+            update,
+            f"🗣 <b>You said:</b> <code>{_escape(text)}</code>",
         )
-
+    except FileNotFoundError as error:
+        await _safe_reply(update, f"⚠️ <b>Voice unavailable:</b> {_escape(error)}")
+    except subprocess.CalledProcessError:
+        await _safe_reply(update, "⚠️ <b>Voice unavailable:</b> ffmpeg failed to decode the audio.")
+    except Exception as error:
+        logger.exception("Voice handler failed")
+        await _safe_reply(update, f"❌ <b>Voice processing failed:</b> {_escape(error)}")
     finally:
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)

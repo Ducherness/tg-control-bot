@@ -1,143 +1,263 @@
+import io
+import logging
 import os
+import socket
+import subprocess
 import threading
 import time
-import subprocess
-import logging
 from collections import deque
-from flask import Flask, jsonify, request
-import pyperclip
-import io
-import base64
+from pathlib import Path
+
 import psutil
-from PIL import ImageGrab
+import pyperclip
 from comtypes import CLSCTX_ALL
+from flask import Flask, jsonify, request, send_file
+from PIL import ImageGrab
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 
 PORT = 8000
-HOST = '0.0.0.0'
+HOST = "0.0.0.0"
 MAX_CLIPBOARD_ITEMS = 5
+MAX_LOG_LINES = 200
+DEFAULT_LOG_LINES = 40
+SYSTEM_DRIVE = f"{os.environ.get('SystemDrive', 'C:')}\\"
+BASE_DIR = Path(__file__).resolve().parent
+LOG_DIR = BASE_DIR / "logs"
+LOG_FILE = LOG_DIR / "agent.log"
+STARTED_AT = time.time()
+
+LOG_DIR.mkdir(exist_ok=True)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 clipboard_history = deque(maxlen=MAX_CLIPBOARD_ITEMS)
-last_clip = ""
+last_clipboard_value = ""
 
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-def clipboard_monitor():
-    global last_clip
+def _run_system_command(command: list[str]) -> None:
+    subprocess.run(
+        command,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=15,
+    )
+
+
+def _audio_endpoint():
+    devices = AudioUtilities.GetSpeakers()
+    interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+    return interface.QueryInterface(IAudioEndpointVolume)
+
+
+def _get_volume_state() -> dict:
+    volume_control = _audio_endpoint()
+    return {
+        "level": round(volume_control.GetMasterVolumeLevelScalar() * 100),
+        "muted": volume_control.GetMute() == 1,
+    }
+
+
+def _tail_log_file(lines: int) -> list[str]:
+    if not LOG_FILE.exists():
+        return []
+
+    with LOG_FILE.open("r", encoding="utf-8") as log_file:
+        content = [line.rstrip() for line in log_file.readlines()]
+    return content[-lines:]
+
+
+def clipboard_monitor() -> None:
+    global last_clipboard_value
+
     logger.info("Clipboard monitor started")
     while True:
         try:
             current_clip = pyperclip.paste()
-            if current_clip and current_clip != last_clip:
-                last_clip = current_clip
+            if current_clip and current_clip != last_clipboard_value:
+                last_clipboard_value = current_clip
                 if not clipboard_history or clipboard_history[0] != current_clip:
                     clipboard_history.appendleft(current_clip)
-                    logger.info(f"New clipboard item detected: {current_clip[:20]}...")
-        except Exception as e:
-            logger.error(f"Clipboard error: {e}")
+                    logger.info("New clipboard item detected")
+        except Exception as error:
+            logger.error("Clipboard error: %s", error)
         time.sleep(1)
 
-@app.route('/ping', methods=['GET'])
-def ping():
-    return jsonify({"status": "online", "platform": os.name})
 
-@app.route('/shutdown', methods=['POST'])
+@app.get("/ping")
+def ping():
+    return jsonify(
+        {
+            "status": "online",
+            "platform": os.name,
+            "hostname": socket.gethostname(),
+            "uptime_seconds": int(time.time() - STARTED_AT),
+        }
+    )
+
+
+@app.get("/health")
+def health():
+    try:
+        boot_time = int(psutil.boot_time())
+        payload = {
+            "status": "ok",
+            "hostname": socket.gethostname(),
+            "platform": os.name,
+            "system": os.environ.get("OS", "Windows"),
+            "uptime_seconds": int(time.time() - STARTED_AT),
+            "boot_time": boot_time,
+            "cpu_percent": psutil.cpu_percent(interval=0.1),
+            "ram_percent": psutil.virtual_memory().percent,
+            "clipboard_items": len(clipboard_history),
+            "pid": os.getpid(),
+        }
+        return jsonify(payload)
+    except Exception as error:
+        logger.error("Health error: %s", error)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.post("/shutdown")
 def shutdown():
     logger.warning("Shutdown command received")
-    if os.name == 'nt':
-        os.system('shutdown /s /t 5')
-    else:
-        os.system('shutdown -h now')
-    return jsonify({"status": "shutting_down"})
+    try:
+        if os.name == "nt":
+            _run_system_command(["shutdown", "/s", "/t", "5"])
+        else:
+            _run_system_command(["shutdown", "-h", "now"])
+        return jsonify({"status": "shutting_down"})
+    except Exception as error:
+        logger.error("Shutdown error: %s", error)
+        return jsonify({"error": str(error)}), 500
 
-@app.route('/sleep', methods=['POST'])
+
+@app.post("/sleep")
 def sleep_pc():
     logger.warning("Sleep command received")
-    if os.name == 'nt':
-        os.system('rundll32.exe powrprof.dll,SetSuspendState 0,1,0')
-    else:
-        os.system('systemctl suspend')
-    return jsonify({"status": "sleeping"})
+    try:
+        if os.name == "nt":
+            _run_system_command(["rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0"])
+        else:
+            _run_system_command(["systemctl", "suspend"])
+        return jsonify({"status": "sleeping"})
+    except Exception as error:
+        logger.error("Sleep error: %s", error)
+        return jsonify({"error": str(error)}), 500
 
-@app.route('/clipboard', methods=['GET'])
+
+@app.get("/clipboard")
 def get_clipboard():
     return jsonify({"history": list(clipboard_history)})
 
-@app.route('/screenshot', methods=['GET'])
+
+@app.delete("/clipboard")
+def clear_clipboard():
+    clipboard_history.clear()
+    logger.info("Clipboard history cleared")
+    return jsonify({"status": "cleared"})
+
+
+@app.get("/screenshot")
 def screenshot():
     try:
-        img = ImageGrab.grab()
-        
-        img_byte_arr = io.BytesIO()
-        img.save(img_byte_arr, format='JPEG', quality=85)
-        img_byte_arr.seek(0)
-        
-        from flask import send_file
-        return send_file(img_byte_arr, mimetype='image/jpeg')
-    except Exception as e:
-        logger.error(f"Screenshot error: {e}")
-        return jsonify({"error": str(e)}), 500
+        image = ImageGrab.grab(all_screens=True)
+        if image.mode != "RGB":
+            image = image.convert("RGB")
 
-@app.route('/stats', methods=['GET'])
+        image_bytes = io.BytesIO()
+        image.save(image_bytes, format="JPEG", quality=88)
+        image_bytes.seek(0)
+        return send_file(image_bytes, mimetype="image/jpeg", download_name="screenshot.jpg")
+    except Exception as error:
+        logger.error("Screenshot error: %s", error)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.get("/stats")
 def stats():
     try:
-        cpu_percent = psutil.cpu_percent(interval=0.1)
-        mem = psutil.virtual_memory()
-        disk = psutil.disk_usage('C:\\\\')
-        
-        data = {
-            "cpu": cpu_percent,
-            "ram_percent": mem.percent,
-            "ram_total_gb": round(mem.total / (1024**3), 1),
-            "ram_used_gb": round(mem.used / (1024**3), 1),
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage(SYSTEM_DRIVE)
+        payload = {
+            "cpu": psutil.cpu_percent(interval=0.1),
+            "ram_percent": memory.percent,
+            "ram_total_gb": round(memory.total / (1024**3), 1),
+            "ram_used_gb": round(memory.used / (1024**3), 1),
             "disk_percent": disk.percent,
-            "disk_free_gb": round(disk.free / (1024**3), 1)
+            "disk_free_gb": round(disk.free / (1024**3), 1),
+            "disk_total_gb": round(disk.total / (1024**3), 1),
+            "disk_path": SYSTEM_DRIVE,
         }
-        return jsonify(data)
-    except Exception as e:
-        logger.error(f"Stats error: {e}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify(payload)
+    except Exception as error:
+        logger.error("Stats error: %s", error)
+        return jsonify({"error": str(error)}), 500
 
-@app.route('/volume', methods=['POST'])
+
+@app.post("/volume")
 def volume():
-    try:
-        data = request.json
-        action = data.get('action')
-        
-        devices = AudioUtilities.GetSpeakers()
-        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        vol_ctrl = interface.QueryInterface(IAudioEndpointVolume)
-        
-        current_vol = vol_ctrl.GetMasterVolumeLevelScalar()
-        
-        if action == 'set':
-            level = float(data.get('level', 0.5))
-            level = max(0.0, min(1.0, level))
-            vol_ctrl.SetMasterVolumeLevelScalar(level, None)
-            return jsonify({"status": "set", "level": level})
-            
-        elif action == 'mute':
-            mute_status = not vol_ctrl.GetMute()
-            vol_ctrl.SetMute(mute_status, None)
-            return jsonify({"status": "muted" if mute_status else "unmuted"})
-            
-        elif action == 'get':
-            pass
-            
-        return jsonify({
-            "level": round(current_vol * 100),
-            "muted": vol_ctrl.GetMute() == 1
-        })
-        
-    except Exception as e:
-        logger.error(f"Volume error: {e}")
-        return jsonify({"error": str(e)}), 500
+    payload = request.get_json(silent=True) or {}
+    action = payload.get("action", "get")
 
-if __name__ == '__main__':
+    try:
+        volume_control = _audio_endpoint()
+
+        if action == "set":
+            raw_level = payload.get("level", 0.5)
+            level = max(0.0, min(1.0, float(raw_level)))
+            volume_control.SetMasterVolumeLevelScalar(level, None)
+            return jsonify({"status": "set", **_get_volume_state()})
+
+        if action == "step":
+            raw_delta = payload.get("delta", 0.0)
+            delta = float(raw_delta)
+            current_level = volume_control.GetMasterVolumeLevelScalar()
+            target_level = max(0.0, min(1.0, current_level + delta))
+            volume_control.SetMasterVolumeLevelScalar(target_level, None)
+            return jsonify({"status": "set", **_get_volume_state()})
+
+        if action == "mute":
+            mute_status = not volume_control.GetMute()
+            volume_control.SetMute(mute_status, None)
+            return jsonify({"status": "muted" if mute_status else "unmuted", **_get_volume_state()})
+
+        if action != "get":
+            return jsonify({"error": f"Unsupported action: {action}"}), 400
+
+        return jsonify({"status": "ok", **_get_volume_state()})
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid volume payload"}), 400
+    except Exception as error:
+        logger.error("Volume error: %s", error)
+        return jsonify({"error": str(error)}), 500
+
+
+@app.get("/logs")
+def logs():
+    try:
+        requested_lines = int(request.args.get("lines", DEFAULT_LOG_LINES))
+        lines = max(1, min(requested_lines, MAX_LOG_LINES))
+        return jsonify({"lines": _tail_log_file(lines)})
+    except ValueError:
+        return jsonify({"error": "Invalid lines value"}), 400
+    except Exception as error:
+        logger.error("Logs error: %s", error)
+        return jsonify({"error": str(error)}), 500
+
+
+if __name__ == "__main__":
     monitor_thread = threading.Thread(target=clipboard_monitor, daemon=True)
     monitor_thread.start()
-    
-    logger.info(f"Agent starting on port {PORT}...")
+
+    logger.info("Agent starting on %s:%s", HOST, PORT)
     app.run(host=HOST, port=PORT)
