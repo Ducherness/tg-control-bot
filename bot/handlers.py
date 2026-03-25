@@ -95,10 +95,23 @@ def _agent_error_text(error: Exception, fallback_message: str = "Agent request f
 
 
 def _format_task(task: dict) -> str:
-    status = "🟢 running" if task.get("running") else "⚪ stopped"
+    task_status = task.get("status", "stopped")
+    status_map = {
+        "running": "🟢 running",
+        "starting": "🟡 starting",
+        "restarting": "🟠 restarting",
+        "error": "🔴 error",
+        "stopped": "⚪ stopped",
+    }
+    status = status_map.get(task_status, f"⚪ {_escape(task_status)}")
     pid = task.get("pid") or "n/a"
     cwd = _escape(task.get("cwd", "n/a"))
-    return f"• <b>{_escape(task.get('name', task.get('id', 'task')))}</b> - {status} (PID: {pid})\n<code>{cwd}</code>"
+    error = task.get("error")
+    suffix = f"\n⚠️ <code>{_escape(error)}</code>" if error else ""
+    return (
+        f"• <b>{_escape(task.get('name', task.get('id', 'task')))}</b> - {status} (PID: {pid})\n"
+        f"<code>{cwd}</code>{suffix}"
+    )
 
 
 async def _agent_request_with_fallback(

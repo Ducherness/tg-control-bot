@@ -30,6 +30,7 @@ LOG_DIR = BASE_DIR / "logs"
 LOG_FILE = LOG_DIR / "agent.log"
 STARTED_AT = time.time()
 DEFAULT_TASK_RESTART_DELAY = 5
+TASK_STARTUP_GRACE_SECONDS = 2
 
 COMFYUI_DIR = Path(os.getenv("COMFYUI_DIR", r"C:\Users\user\ComfyUI"))
 COMFYUI_PORT = int(os.getenv("COMFYUI_PORT", "8188"))
@@ -105,10 +106,6 @@ def _tail_log_file(lines: int) -> list[str]:
     return content[-lines:]
 
 
-def _powershell_literal(value: str) -> str:
-    return value.replace("'", "''")
-
-
 def _task_log_path(task_key: str) -> Path:
     return LOG_DIR / f"{task_key}.log"
 
@@ -116,11 +113,7 @@ def _task_log_path(task_key: str) -> Path:
 def _task_creation_flags() -> int:
     if os.name != "nt":
         return 0
-    return (
-        getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        | getattr(subprocess, "DETACHED_PROCESS", 0)
-        | getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    )
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 def _task_runtime_info(task_key: str) -> dict:
@@ -130,6 +123,8 @@ def _task_runtime_info(task_key: str) -> dict:
     pid = None
     running = False
     started_at = None
+    status = "stopped"
+    error = None
 
     if runtime:
         process = runtime.get("process")
@@ -137,48 +132,83 @@ def _task_runtime_info(task_key: str) -> dict:
             pid = process.pid
             running = True
             started_at = runtime.get("started_at")
-        else:
-            log_handle = runtime.get("log_handle")
-            if log_handle and not log_handle.closed:
-                log_handle.close()
-            managed_tasks.pop(task_key, None)
-            runtime = None
+        status = runtime.get("status", "stopped")
+        error = runtime.get("startup_error")
 
     return {
         "id": task_key,
         "name": definition["name"],
         "cwd": str(definition["cwd"]),
         "running": running,
+        "status": status,
         "pid": pid,
         "started_at": started_at,
         "log_file": str(_task_log_path(task_key)),
+        "error": error,
     }
 
 
-def _build_task_command(task_key: str) -> list[str]:
+def _write_task_log(log_handle, message: str) -> None:
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    log_handle.write(f"[{timestamp}] {message}\n")
+    log_handle.flush()
+
+
+def _task_supervisor(task_key: str) -> None:
     definition = TASK_DEFINITIONS[task_key]
-    cwd = Path(definition["cwd"])
-    python_executable = Path(definition["python"])
-    args = " ".join(f"'{_powershell_literal(argument)}'" for argument in definition["args"])
+    runtime = managed_tasks[task_key]
+    stop_event = runtime["stop_event"]
+    ready_event = runtime["ready_event"]
+    log_handle = runtime["log_handle"]
+
+    command = [str(definition["python"]), *definition["args"]]
+    cwd = str(definition["cwd"])
     restart_delay = int(definition["restart_delay"])
-    command = (
-        f"Set-Location -LiteralPath '{_powershell_literal(str(cwd))}'; "
-        f"while ($true) {{ "
-        f"& '{_powershell_literal(str(python_executable))}' {args}; "
-        f"Write-Host '{definition['name']} exited. Restarting in {restart_delay} seconds...'; "
-        f"Start-Sleep -Seconds {restart_delay} "
-        f"}}"
-    )
-    return [
-        "powershell.exe",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-WindowStyle",
-        "Hidden",
-        "-Command",
-        command,
-    ]
+
+    while not stop_event.is_set():
+        try:
+            process = subprocess.Popen(
+                command,
+                cwd=cwd,
+                stdout=log_handle,
+                stderr=log_handle,
+                stdin=subprocess.DEVNULL,
+                creationflags=_task_creation_flags(),
+            )
+        except Exception as error:
+            runtime["process"] = None
+            runtime["started_at"] = None
+            runtime["startup_error"] = str(error)
+            runtime["status"] = "error"
+            _write_task_log(log_handle, f"Failed to start {definition['name']}: {error}")
+            ready_event.set()
+            return
+
+        runtime["process"] = process
+        runtime["started_at"] = int(time.time())
+        runtime["startup_error"] = None
+        runtime["status"] = "running"
+        _write_task_log(log_handle, f"Started {definition['name']} with PID {process.pid}")
+        ready_event.set()
+
+        exit_code = process.wait()
+        runtime["process"] = None
+        runtime["started_at"] = None
+
+        if stop_event.is_set():
+            runtime["status"] = "stopped"
+            _write_task_log(log_handle, f"Stopped {definition['name']}.")
+            return
+
+        runtime["status"] = "restarting"
+        _write_task_log(
+            log_handle,
+            f"{definition['name']} exited with code {exit_code}. Restarting in {restart_delay} seconds...",
+        )
+        if stop_event.wait(restart_delay):
+            runtime["status"] = "stopped"
+            _write_task_log(log_handle, f"Stopped {definition['name']}.")
+            return
 
 
 def _start_task(task_key: str) -> dict:
@@ -198,25 +228,38 @@ def _start_task(task_key: str) -> dict:
     log_path = _task_log_path(task_key)
     log_handle = log_path.open("a", encoding="utf-8")
     try:
-        process = subprocess.Popen(
-            _build_task_command(task_key),
-            cwd=str(cwd),
-            stdout=log_handle,
-            stderr=log_handle,
-            stdin=subprocess.DEVNULL,
-            creationflags=_task_creation_flags(),
-        )
+        stop_event = threading.Event()
+        ready_event = threading.Event()
+        supervisor = threading.Thread(target=_task_supervisor, args=(task_key,), daemon=True)
+        managed_tasks[task_key] = {
+            "process": None,
+            "thread": supervisor,
+            "stop_event": stop_event,
+            "ready_event": ready_event,
+            "started_at": None,
+            "startup_error": None,
+            "status": "starting",
+            "log_handle": log_handle,
+        }
+        supervisor.start()
+        ready_event.wait(timeout=TASK_STARTUP_GRACE_SECONDS)
+        if not ready_event.is_set():
+            raise RuntimeError(f"{definition['name']} did not start within {TASK_STARTUP_GRACE_SECONDS} seconds")
+        time.sleep(TASK_STARTUP_GRACE_SECONDS)
+        runtime_info = _task_runtime_info(task_key)
+        if runtime_info["status"] in {"error", "restarting", "stopped"} or not runtime_info["running"]:
+            raise RuntimeError(
+                f"{definition['name']} exited immediately. Check log: {runtime_info['log_file']}"
+            )
     except Exception:
+        runtime = managed_tasks.pop(task_key, None)
+        if runtime:
+            runtime["stop_event"].set()
         log_handle.close()
         raise
 
-    managed_tasks[task_key] = {
-        "process": process,
-        "started_at": int(time.time()),
-        "log_handle": log_handle,
-    }
-    logger.info("Started task %s with PID %s", task_key, process.pid)
-    return _task_runtime_info(task_key)
+    logger.info("Started task %s with PID %s", task_key, runtime_info["pid"])
+    return runtime_info
 
 
 def _stop_task(task_key: str) -> dict:
@@ -224,6 +267,7 @@ def _stop_task(task_key: str) -> dict:
     if not runtime:
         return _task_runtime_info(task_key)
 
+    runtime["stop_event"].set()
     process = runtime.get("process")
     if process and process.poll() is None:
         if os.name == "nt":
@@ -235,6 +279,10 @@ def _stop_task(task_key: str) -> dict:
             )
         else:
             process.terminate()
+
+    thread = runtime.get("thread")
+    if thread and thread.is_alive():
+        thread.join(timeout=10)
 
     log_handle = runtime.get("log_handle")
     if log_handle and not log_handle.closed:
