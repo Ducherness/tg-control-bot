@@ -18,6 +18,8 @@ from bot.wol import wake
 logger = logging.getLogger(__name__)
 AGENT_URL = f"http://{TARGET_HOST}:{AGENT_PORT}"
 MAX_TEXT_BLOCK = 3500
+WAKE_WAIT_TIMEOUT_SECONDS = 180
+WAKE_WAIT_INTERVAL_SECONDS = 5
 
 
 def is_allowed(user_id: int | None) -> bool:
@@ -26,11 +28,13 @@ def is_allowed(user_id: int | None) -> bool:
 
 def get_keyboard() -> ReplyKeyboardMarkup:
     keyboard = [
-        [KeyboardButton("🚀 Wake"), KeyboardButton("🔍 Status"), KeyboardButton("🩺 Health")],
+        [KeyboardButton("🚀 Wake"), KeyboardButton("⏳ Wake&Wait"), KeyboardButton("🔍 Status")],
+        [KeyboardButton("😴 Sleep"), KeyboardButton("💤 Hibernate"), KeyboardButton("🩺 Health")],
+        [KeyboardButton("🧩 Tasks"), KeyboardButton("▶️ ComfyUI"), KeyboardButton("⏹️ ComfyUI")],
         [KeyboardButton("📸 Screen"), KeyboardButton("📋 Clipboard"), KeyboardButton("🧹 Clear Clip")],
         [KeyboardButton("📊 Stats"), KeyboardButton("📜 Logs"), KeyboardButton("🔊 Volume")],
-        [KeyboardButton("😴 Sleep"), KeyboardButton("🛑 Shutdown"), KeyboardButton("ℹ️ Help")],
         [KeyboardButton("🔉 -10%"), KeyboardButton("🔇 Mute"), KeyboardButton("🔊 +10%")],
+        [KeyboardButton("🛑 Shutdown"), KeyboardButton("ℹ️ Help")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
@@ -88,6 +92,13 @@ def _agent_error_text(error: Exception, fallback_message: str = "Agent request f
     return f"❌ <b>Failed:</b> {_escape(fallback_message)}"
 
 
+def _format_task(task: dict) -> str:
+    status = "🟢 running" if task.get("running") else "⚪ stopped"
+    pid = task.get("pid") or "n/a"
+    cwd = _escape(task.get("cwd", "n/a"))
+    return f"• <b>{_escape(task.get('name', task.get('id', 'task')))}</b> - {status} (PID: {pid})\n<code>{cwd}</code>"
+
+
 async def check_permissions(update: Update) -> bool:
     if not is_allowed(update.effective_user.id if update.effective_user else None):
         await update.effective_message.reply_text("⛔ Access denied", reply_markup=get_keyboard())
@@ -112,6 +123,22 @@ async def _ping_host() -> bool:
     return await asyncio.to_thread(_run_ping)
 
 
+async def _wait_for_agent_online(timeout_seconds: int = WAKE_WAIT_TIMEOUT_SECONDS) -> bool:
+    attempts = max(1, timeout_seconds // WAKE_WAIT_INTERVAL_SECONDS)
+    await asyncio.sleep(WAKE_WAIT_INTERVAL_SECONDS)
+
+    for _ in range(attempts):
+        try:
+            response = await _agent_request("GET", "/ping", timeout=2.5)
+            if response.status_code == 200:
+                return True
+        except httpx.HTTPError:
+            pass
+        await asyncio.sleep(WAKE_WAIT_INTERVAL_SECONDS)
+
+    return False
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
@@ -119,7 +146,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "🖥️ <b>Remote Control Center</b>\n\n"
         "Use the keyboard below or send a short text command.\n"
-        "Examples: <code>status</code>, <code>screen</code>, <code>mute</code>, <code>show logs</code>."
+        "For sleep/resume flow, disable Windows sign-in requirement after wake."
     )
     await _safe_reply(update, text)
 
@@ -135,17 +162,20 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 <b>Available commands</b>\n\n"
         "🚀 <b>Wake</b> - send Wake-on-LAN packet\n"
-        "🔍 <b>Status</b> - check host and agent reachability\n"
-        "🩺 <b>Health</b> - show agent uptime and runtime info\n"
-        "📸 <b>Screen</b> - capture current desktop\n"
+        "⏳ <b>Wake&Wait</b> - send Wake-on-LAN and wait until the agent is back online\n"
+        "😴 <b>Sleep</b> - suspend the PC\n"
+        "💤 <b>Hibernate</b> - hibernate and preserve session state on resume\n"
+        "🩺 <b>Health</b> - show agent runtime info\n"
+        "🧩 <b>Tasks</b> - list managed processes on the PC\n"
+        "▶️ <b>ComfyUI</b> - start managed ComfyUI loop\n"
+        "⏹️ <b>ComfyUI</b> - stop managed ComfyUI loop\n"
+        "📸 <b>Screen</b> - capture desktop\n"
         "📋 <b>Clipboard</b> - show recent clipboard items\n"
-        "🧹 <b>Clear Clip</b> - clear clipboard history on the agent\n"
         "📊 <b>Stats</b> - CPU, RAM and disk usage\n"
         "📜 <b>Logs</b> - last agent log lines\n"
         "🔊 <b>Volume</b> - current sound state\n"
-        "😴 <b>Sleep</b> - suspend the PC\n"
         "🛑 <b>Shutdown</b> - power off the PC\n\n"
-        "You can also send free-form text like <code>take screenshot</code> or <code>clear clipboard</code>."
+        "For auto-return to desktop after sleep/hibernate, Windows must be configured to not require sign-in on wake."
     )
     await _safe_reply(update, help_text)
 
@@ -179,6 +209,8 @@ async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         response = await _agent_request("GET", "/health")
         data = response.json()
+        tasks = data.get("tasks", [])
+        tasks_text = "\n".join(_format_task(task) for task in tasks) if tasks else "• No managed tasks"
         text = (
             "🩺 <b>Agent Health</b>\n\n"
             f"🏷️ <b>Host:</b> {_escape(data.get('hostname', TARGET_HOST))}\n"
@@ -187,7 +219,8 @@ async def health_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📦 <b>PID:</b> {_escape(data.get('pid', 'n/a'))}\n"
             f"🧠 <b>CPU:</b> {_escape(data.get('cpu_percent', 'n/a'))}%\n"
             f"💾 <b>RAM:</b> {_escape(data.get('ram_percent', 'n/a'))}%\n"
-            f"📋 <b>Clipboard items:</b> {_escape(data.get('clipboard_items', 0))}"
+            f"📋 <b>Clipboard items:</b> {_escape(data.get('clipboard_items', 0))}\n\n"
+            f"🧩 <b>Tasks</b>\n{tasks_text}"
         )
         await _safe_reply(update, text)
     except httpx.HTTPError as error:
@@ -206,6 +239,30 @@ async def wake_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _safe_reply(update, "🚀 <b>Magic Packet Sent</b>\nWaiting for PC to wake up...")
 
 
+async def wake_wait_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    if not TARGET_MAC:
+        await _safe_reply(update, "⚠️ <b>Error:</b> TARGET_MAC is not configured.")
+        return
+
+    wake(TARGET_MAC)
+    await _safe_reply(
+        update,
+        "⏳ <b>Wake&Wait started.</b>\nMagic packet sent. Waiting for the agent to come back online...",
+    )
+
+    if await _wait_for_agent_online():
+        await _safe_reply(
+            update,
+            "✅ <b>Agent is back online.</b>\nIf Windows sign-in on wake is disabled, your previous session should be restored.",
+        )
+        return
+
+    await _safe_reply(update, "⚠️ <b>Wake timeout.</b>\nThe host did not come online within 3 minutes.")
+
+
 async def shutdown_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_permissions(update):
         return
@@ -222,10 +279,21 @@ async def sleep_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     try:
-        await _agent_request("POST", "/sleep", timeout=4.0)
+        await _agent_request("POST", "/sleep", timeout=6.0)
         await _safe_reply(update, "😴 <b>Sleep initiated.</b>")
     except httpx.HTTPError as error:
         await _safe_reply(update, _agent_error_text(error, "Sleep was rejected."))
+
+
+async def hibernate_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    try:
+        await _agent_request("POST", "/hibernate", timeout=6.0)
+        await _safe_reply(update, "💤 <b>Hibernate initiated.</b>")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Hibernate was rejected."))
 
 
 async def clipboard_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -314,6 +382,51 @@ async def logs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _safe_reply(update, _agent_error_text(error, "Unable to read agent logs."))
 
 
+async def tasks_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    try:
+        response = await _agent_request("GET", "/tasks")
+        tasks = response.json().get("tasks", [])
+        if not tasks:
+            await _safe_reply(update, "🧩 <b>No managed tasks configured.</b>")
+            return
+
+        text = "🧩 <b>Managed Tasks</b>\n\n" + "\n\n".join(_format_task(task) for task in tasks)
+        await _safe_reply(update, text)
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to read task list."))
+
+
+async def start_comfy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    try:
+        response = await _agent_request("POST", "/tasks/comfyui/start", timeout=8.0)
+        task = response.json().get("task", {})
+        text = (
+            "▶️ <b>ComfyUI started.</b>\n"
+            f"PID: {_escape(task.get('pid', 'n/a'))}\n"
+            f"Log: <code>{_escape(task.get('log_file', 'n/a'))}</code>"
+        )
+        await _safe_reply(update, text)
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to start ComfyUI."))
+
+
+async def stop_comfy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_permissions(update):
+        return
+
+    try:
+        await _agent_request("POST", "/tasks/comfyui/stop", timeout=8.0)
+        await _safe_reply(update, "⏹️ <b>ComfyUI stopped.</b>")
+    except httpx.HTTPError as error:
+        await _safe_reply(update, _agent_error_text(error, "Unable to stop ComfyUI."))
+
+
 async def _volume_step(update: Update, delta: float) -> None:
     response = await _agent_request("POST", "/volume", json={"action": "step", "delta": delta})
     data = response.json()
@@ -353,11 +466,16 @@ async def ping_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def _dispatch_intent(update: Update, context: ContextTypes.DEFAULT_TYPE, action: str) -> bool:
     handlers = {
         "wake": wake_handler,
+        "wake_wait": wake_wait_handler,
         "shutdown": shutdown_handler,
         "sleep": sleep_handler,
+        "hibernate": hibernate_handler,
         "status": status_handler,
         "health": health_handler,
         "logs": logs_handler,
+        "tasks": tasks_handler,
+        "start_comfyui": start_comfy_handler,
+        "stop_comfyui": stop_comfy_handler,
         "ping": ping_handler,
         "screenshot": screenshot_handler,
         "stats": stats_handler,
@@ -380,8 +498,13 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     button_actions = {
         "🚀 Wake": wake_handler,
-        "🛑 Shutdown": shutdown_handler,
+        "⏳ Wake&Wait": wake_wait_handler,
         "😴 Sleep": sleep_handler,
+        "💤 Hibernate": hibernate_handler,
+        "🧩 Tasks": tasks_handler,
+        "▶️ ComfyUI": start_comfy_handler,
+        "⏹️ ComfyUI": stop_comfy_handler,
+        "🛑 Shutdown": shutdown_handler,
         "📋 Clipboard": clipboard_handler,
         "🧹 Clear Clip": clear_clipboard_handler,
         "📸 Screen": screenshot_handler,
@@ -424,7 +547,7 @@ async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if await _dispatch_intent(update, context, intent.get("action", "unknown")):
         return
 
-    await _safe_reply(update, "❓ <b>Unknown command.</b>\nTry <code>status</code>, <code>screen</code> or <code>help</code>.")
+    await _safe_reply(update, "❓ <b>Unknown command.</b>\nTry <code>wake and wait</code>, <code>tasks</code> or <code>help</code>.")
 
 
 async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -456,10 +579,7 @@ async def voice_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        await _safe_reply(
-            update,
-            f"🗣 <b>You said:</b> <code>{_escape(text)}</code>",
-        )
+        await _safe_reply(update, f"🗣 <b>You said:</b> <code>{_escape(text)}</code>")
     except FileNotFoundError as error:
         await _safe_reply(update, f"⚠️ <b>Voice unavailable:</b> {_escape(error)}")
     except subprocess.CalledProcessError:

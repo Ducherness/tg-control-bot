@@ -14,11 +14,16 @@ No explanations. No text outside JSON.
 
 Allowed actions:
 - wake
+- wake_wait
 - shutdown
 - sleep
+- hibernate
 - status
 - health
 - logs
+- tasks
+- start_comfyui
+- stop_comfyui
 - ping
 - screenshot
 - stats
@@ -31,31 +36,36 @@ Examples:
 User: turn on my computer
 Response: {"action":"wake"}
 
-User: shut it down
-Response: {"action":"shutdown"}
+User: wake the pc and wait
+Response: {"action":"wake_wait"}
 
-User: take a screenshot
-Response: {"action":"screenshot"}
-
-User: show me cpu usage
-Response: {"action":"stats"}
+User: hibernate the laptop
+Response: {"action":"hibernate"}
 
 User: show agent logs
 Response: {"action":"logs"}
 
-User: clear clipboard history
-Response: {"action":"clear_clipboard"}
+User: list tasks
+Response: {"action":"tasks"}
 
-User: mute the volume
-Response: {"action":"volume"}
+User: start comfyui
+Response: {"action":"start_comfyui"}
+
+User: stop comfyui
+Response: {"action":"stop_comfyui"}
 """
 
 FALLBACK_RULES = (
     ("clear_clipboard", ("clear clipboard", "clipboard clear", "очисти буфер", "очистить буфер")),
+    ("start_comfyui", ("start comfyui", "run comfyui", "запусти comfyui", "включи comfyui")),
+    ("stop_comfyui", ("stop comfyui", "kill comfyui", "останови comfyui", "выключи comfyui")),
+    ("tasks", ("tasks", "processes", "managed tasks", "задачи", "процессы")),
     ("clipboard", ("clipboard", "буфер", "copied text")),
     ("screenshot", ("screenshot", "screen", "экран", "скрин")),
+    ("hibernate", ("hibernate", "гибернация", "гибернируй")),
     ("shutdown", ("shutdown", "turn off", "power off", "выключи", "отключи")),
     ("sleep", ("sleep", "suspend", "спящий", "усыпи")),
+    ("wake_wait", ("wake and wait", "wake wait", "разбуди и жди", "включи и жди")),
     ("wake", ("wake", "turn on", "start pc", "включи", "разбуди")),
     ("health", ("health", "agent info", "system info", "здоровье", "инфо")),
     ("logs", ("logs", "log", "журнал", "логи")),
