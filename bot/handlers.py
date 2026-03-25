@@ -77,6 +77,8 @@ async def _safe_reply(update: Update, text: str, *, parse_mode: str | None = "HT
 def _agent_error_text(error: Exception, fallback_message: str = "Agent request failed.") -> str:
     if isinstance(error, httpx.HTTPStatusError):
         details = fallback_message
+        if error.response.status_code == 404:
+            return "❌ <b>Agent route not found.</b> Agent is outdated or was not restarted after the update."
         try:
             payload = error.response.json()
             details = payload.get("error") or payload.get("status") or details
@@ -97,6 +99,21 @@ def _format_task(task: dict) -> str:
     pid = task.get("pid") or "n/a"
     cwd = _escape(task.get("cwd", "n/a"))
     return f"• <b>{_escape(task.get('name', task.get('id', 'task')))}</b> - {status} (PID: {pid})\n<code>{cwd}</code>"
+
+
+async def _agent_request_with_fallback(
+    method: str,
+    primary_endpoint: str,
+    fallback_endpoint: str,
+    timeout: float | None = None,
+    **kwargs,
+) -> httpx.Response:
+    try:
+        return await _agent_request(method, primary_endpoint, timeout=timeout, **kwargs)
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code != 404:
+            raise
+    return await _agent_request(method, fallback_endpoint, timeout=timeout, **kwargs)
 
 
 async def check_permissions(update: Update) -> bool:
@@ -404,7 +421,12 @@ async def start_comfy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     try:
-        response = await _agent_request("POST", "/tasks/comfyui/start", timeout=8.0)
+        response = await _agent_request_with_fallback(
+            "POST",
+            "/comfyui/start",
+            "/tasks/comfyui/start",
+            timeout=8.0,
+        )
         task = response.json().get("task", {})
         text = (
             "▶️ <b>ComfyUI started.</b>\n"
@@ -421,7 +443,12 @@ async def stop_comfy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        await _agent_request("POST", "/tasks/comfyui/stop", timeout=8.0)
+        await _agent_request_with_fallback(
+            "POST",
+            "/comfyui/stop",
+            "/tasks/comfyui/stop",
+            timeout=8.0,
+        )
         await _safe_reply(update, "⏹️ <b>ComfyUI stopped.</b>")
     except httpx.HTTPError as error:
         await _safe_reply(update, _agent_error_text(error, "Unable to stop ComfyUI."))

@@ -455,6 +455,11 @@ def start_task(task_key: str):
         return jsonify({"error": str(error)}), 500
 
 
+@app.post("/comfyui/start")
+def start_comfyui():
+    return start_task("comfyui")
+
+
 @app.post("/tasks/<task_key>/stop")
 def stop_task(task_key: str):
     if task_key not in TASK_DEFINITIONS:
@@ -466,6 +471,11 @@ def stop_task(task_key: str):
     except Exception as error:
         logger.error("Task stop error for %s: %s", task_key, error)
         return jsonify({"error": str(error)}), 500
+
+
+@app.post("/comfyui/stop")
+def stop_comfyui():
+    return stop_task("comfyui")
 
 
 @app.get("/logs")
